@@ -66,14 +66,17 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 		logger.Warn("Embedding failed, indexing purely lexically", "error", err)
 	}
 
-	tempWordVectors := make(map[string][]float32)
+	tempWordVectors := make(map[string]VectorEntry)
 	for _, t := range rawTokens {
 		_, exists := tempWordVectors[t]
 		if !e.vectors.HasWordVector(t) && !exists {
 			// Best effort word embeddings
 			vec, err := e.embedder.Embed(ctx, t)
 			if err == nil {
-				tempWordVectors[t] = vec
+				tempWordVectors[t] = VectorEntry{
+					Vector:    vec,
+					Magnitude: ranking.Magnitude(vec),
+				}
 			}
 		}
 	}
@@ -123,7 +126,10 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 
 	e.idMapping[internalID] = originalID
 	if docVec != nil {
-		docVecStore[internalID] = docVec
+		docVecStore[internalID] = VectorEntry{
+			Vector:    docVec,
+			Magnitude: ranking.Magnitude(docVec),
+		}
 	}
 	maps.Copy(wordVecs, tempWordVectors)
 
@@ -307,9 +313,11 @@ func (e *Engine) vectorPass(queryVec []float32) map[uint32]float64 {
 	if len(queryVec) == 0 {
 		return vectorScores
 	}
+	
+	queryMag := ranking.Magnitude(queryVec)
 	vStore := e.vectors.GetVectors()
-	for id, docVec := range vStore {
-		vectorScores[id] = float64(ranking.CosineSimilarity(queryVec, docVec))
+	for id, docEntry := range vStore {
+		vectorScores[id] = float64(ranking.CosineSimilarity(queryVec, docEntry.Vector, queryMag, docEntry.Magnitude))
 	}
 	return vectorScores
 }
@@ -392,17 +400,17 @@ func (e *Engine) getSemanticNeighbors(token string, topN int, threshold float32)
 	defer e.vectors.RUnlock()
 	wordAndVec := e.vectors.GetWordVectors()
 
-	tokenVec, ok := wordAndVec[token]
+	tokenEntry, ok := wordAndVec[token]
 	if !ok {
 		return []string{}
 	}
 
 	var candidates []string
-	for word, vec := range wordAndVec {
+	for word, entry := range wordAndVec {
 		if word == token {
 			continue
 		}
-		score := ranking.CosineSimilarity(tokenVec, vec)
+		score := ranking.CosineSimilarity(tokenEntry.Vector, entry.Vector, tokenEntry.Magnitude, entry.Magnitude)
 		if score >= threshold {
 			candidates = append(candidates, word)
 		}

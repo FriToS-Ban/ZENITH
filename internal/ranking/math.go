@@ -1,4 +1,4 @@
-package analysis
+package ranking
 
 import "math"
 

@@ -313,11 +313,9 @@ func (e *Engine) vectorPass(queryVec []float32) map[uint32]float64 {
 	if len(queryVec) == 0 {
 		return vectorScores
 	}
-	
-	queryMag := ranking.Magnitude(queryVec)
 	vStore := e.vectors.GetVectors()
 	for id, docEntry := range vStore {
-		vectorScores[id] = float64(ranking.CosineSimilarity(queryVec, docEntry.Vector, queryMag, docEntry.Magnitude))
+		vectorScores[id] = ranking.DotProduct(queryVec, docEntry.Vector)
 	}
 	return vectorScores
 }
@@ -410,7 +408,7 @@ func (e *Engine) getSemanticNeighbors(token string, topN int, threshold float32)
 		if word == token {
 			continue
 		}
-		score := ranking.CosineSimilarity(tokenEntry.Vector, entry.Vector, tokenEntry.Magnitude, entry.Magnitude)
+		score := float32(ranking.DotProduct(tokenEntry.Vector, entry.Vector))
 		if score >= threshold {
 			candidates = append(candidates, word)
 		}

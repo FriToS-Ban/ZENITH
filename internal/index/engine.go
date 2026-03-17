@@ -67,16 +67,30 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 	}
 
 	tempWordVectors := make(map[string]VectorEntry)
+	var tokensToEmbed []string
+	
 	for _, t := range rawTokens {
 		_, exists := tempWordVectors[t]
 		if !e.vectors.HasWordVector(t) && !exists {
-			// Best effort word embeddings
-			vec, err := e.embedder.Embed(ctx, t)
-			if err == nil {
+			tokensToEmbed = append(tokensToEmbed, t)
+			tempWordVectors[t] = VectorEntry{} // reserve spot
+		}
+	}
+
+	if len(tokensToEmbed) > 0 {
+		batchVecs, err := e.embedder.EmbedBatch(ctx, tokensToEmbed)
+		if err == nil && len(batchVecs) == len(tokensToEmbed) {
+			for i, t := range tokensToEmbed {
 				tempWordVectors[t] = VectorEntry{
-					Vector:    vec,
-					Magnitude: ranking.Magnitude(vec),
+					Vector:    FloatsToFloat16(batchVecs[i]),
+					Magnitude: ranking.Magnitude(batchVecs[i]),
 				}
+			}
+		} else {
+			logger.Warn("Batch embedding failed for tokens", "error", err)
+			// Remove empty reservations if batch failed
+			for _, t := range tokensToEmbed {
+				delete(tempWordVectors, t)
 			}
 		}
 	}
@@ -127,7 +141,7 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 	e.idMapping[internalID] = originalID
 	if docVec != nil {
 		docVecStore[internalID] = VectorEntry{
-			Vector:    docVec,
+			Vector:    FloatsToFloat16(docVec),
 			Magnitude: ranking.Magnitude(docVec),
 		}
 	}
@@ -315,7 +329,7 @@ func (e *Engine) vectorPass(queryVec []float32) map[uint32]float64 {
 	}
 	vStore := e.vectors.GetVectors()
 	for id, docEntry := range vStore {
-		vectorScores[id] = ranking.DotProduct(queryVec, docEntry.Vector)
+		vectorScores[id] = ranking.DotProduct(queryVec, Float16ToFloats(docEntry.Vector))
 	}
 	return vectorScores
 }
@@ -408,7 +422,7 @@ func (e *Engine) getSemanticNeighbors(token string, topN int, threshold float32)
 		if word == token {
 			continue
 		}
-		score := float32(ranking.DotProduct(tokenEntry.Vector, entry.Vector))
+		score := float32(ranking.DotProduct(Float16ToFloats(tokenEntry.Vector), Float16ToFloats(entry.Vector)))
 		if score >= threshold {
 			candidates = append(candidates, word)
 		}

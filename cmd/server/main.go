@@ -34,7 +34,12 @@ func main() {
 
 	// Dependency Bootstrapping
 	tkz := analysis.NewStandardAnalyzer()
-	embedder := embedding.NewNeuralEmbedder(appConfig.NerveURL, appConfig.NerveTimeout)
+	rawEmbedder := embedding.NewNeuralEmbedder(appConfig.NerveURL, appConfig.NerveTimeout)
+	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000) // cache up to 10k words
+	if err != nil {
+		slog.Error("failed to create embedding cache", "error", err)
+		os.Exit(1)
+	}
 	scorer := ranking.NewRRFRanker(appConfig.RRFConstant)
 
 	engine := index.NewEngine(appConfig, embedder, scorer, tkz)

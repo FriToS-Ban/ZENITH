@@ -1,10 +1,31 @@
 package index
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/x448/float16"
+)
 
 type VectorEntry struct {
-	Vector    []float32
+	Vector    []uint16 // Stored as float16 representation
 	Magnitude float64
+}
+
+// Memory optimization helpers
+func FloatsToFloat16(vec []float32) []uint16 {
+	out := make([]uint16, len(vec))
+	for i, v := range vec {
+		out[i] = float16.Fromfloat32(v).Bits()
+	}
+	return out
+}
+
+func Float16ToFloats(vec []uint16) []float32 {
+	out := make([]float32, len(vec))
+	for i, v := range vec {
+		out[i] = float16.Frombits(v).Float32()
+	}
+	return out
 }
 
 type VectorStore struct {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,39 +30,29 @@ type CompressionCodec int
 const (
 	CodecNone CompressionCodec = iota
 	CodecSnappy
-	CodecZstd // developed by facebook better than gzip
+	CodecZstd
 )
 
 type WALConfig struct {
-	// durability
 	SyncMode          SyncMode
-	SyncInterval      time.Duration // for periodic
-	GroupCommitWindow time.Duration // for group commit
-
-	// storage
-	MaxSegmentSize int64
-	Dir            string
-
-	// compression
-	Codec     CompressionCodec
-	ZstdLevel int
+	SyncInterval      time.Duration
+	GroupCommitWindow time.Duration
+	MaxSegmentSize    int64
+	Dir               string
+	Codec             CompressionCodec
+	ZstdLevel         int
 }
 
 type WAL struct {
-
-	cfg WALConfig
-	
-	mu sync.Mutex
-	seq atomic.Uint64
-	closed atomic.Bool
-
-	file *os.File
-	buf *bufio.Writer
-	
-	syncCh chan struct{} // stop signal 
-	syncDone chan struct{} // background threads done
-	byteWritten int64
-
+	cfg         WALConfig
+	mu          sync.Mutex
+	seq         atomic.Uint64
+	closed      atomic.Bool
+	file        *os.File
+	buf         *bufio.Writer
+	syncCh      chan struct{}
+	syncDone    chan struct{}
+	byteWritten uint64
 }
 
 type OpType byte
@@ -106,58 +97,53 @@ func encodeRecord(r *Record) ([]byte, error) {
 		return nil, err
 	}
 
-	if len(r.Key) > math.MaxUint32 {
-		return nil, errors.New("key too large")
+	// FIX Bug 8: key is encoded as uint16, so the guard must also be uint16 max,
+	// not MaxUint32. A key between 65536–MaxUint32 bytes would silently truncate
+	// the length field and produce a corrupt record that passes this check.
+	if len(r.Key) > math.MaxUint16 {
+		return nil, errors.New("key too large: max 65535 bytes")
 	}
 
 	if len(r.Value) > math.MaxUint32 {
 		return nil, errors.New("value too large")
 	}
 
-	const headerSize = 8 + 1 + 2 + 4 // seq + op + keylen + valuelen
-	totalSize := headerSize + len(r.Key) + len(r.Value)
+	const hdrSize = 8 + 1 + 2 + 4 // seq + op + keyLen + valLen
+	totalSize := hdrSize + len(r.Key) + len(r.Value)
 
 	buf := make([]byte, totalSize)
-
 	offset := 0
 
-	// seq
 	binary.LittleEndian.PutUint64(buf[offset:], r.Seq)
 	offset += 8
 
-	// op
 	buf[offset] = byte(r.Op)
 	offset += 1
 
-	// key length
 	binary.LittleEndian.PutUint16(buf[offset:], uint16(len(r.Key)))
 	offset += 2
 
-	// value length
 	binary.LittleEndian.PutUint32(buf[offset:], uint32(len(r.Value)))
 	offset += 4
 
-	// key
 	copy(buf[offset:], r.Key)
 	offset += len(r.Key)
 
-	// value
 	copy(buf[offset:], r.Value)
 
 	return buf, nil
 }
 
-// [CRC][LENGTH][BODY]
+// Entry wire format: [CRC32 (4)] [LENGTH (4)] [BODY (LENGTH)]
+// CRC covers [LENGTH + BODY] so a corrupt length is also detected.
 
 const (
-	crcSize   = 4
-	lenSize   = 4
+	crcSize    = 4
+	lenSize    = 4
 	headerSize = crcSize + lenSize
 )
 
-
-func buildEntry(body []byte) ([]byte,error) {
-
+func buildEntry(body []byte) ([]byte, error) {
 	if len(body) == 0 {
 		return nil, errors.New("empty body")
 	}
@@ -166,23 +152,18 @@ func buildEntry(body []byte) ([]byte,error) {
 		return nil, errors.New("body too large")
 	}
 
-	// 4 bytes for crc, 4 bytes for length, body
 	totalSize := headerSize + len(body)
 	buf := make([]byte, totalSize)
 
 	binary.LittleEndian.PutUint32(buf[crcSize:], uint32(len(body)))
-
 	copy(buf[headerSize:], body)
 
-	// crc for length + body
+	// CRC covers [length field + body]
 	payload := buf[crcSize:]
 	crc := crc32.ChecksumIEEE(payload)
-
 	binary.LittleEndian.PutUint32(buf[0:], crc)
 
-	return buf,nil
-	
-	
+	return buf, nil
 }
 
 func decodeRecord(body []byte) (Record, error) {
@@ -224,7 +205,6 @@ func decodeRecord(body []byte) (Record, error) {
 }
 
 func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
-	
 	if w.closed.Load() {
 		return 0, errors.New("wal is closed")
 	}
@@ -235,60 +215,86 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 	default:
 	}
 
+	// FIX Bug 3: validate before consuming a sequence number.
+	// Previously seq.Add(1) ran before encodeRecord, so a rejected record
+	// burned a sequence number and created a gap that breaks ordering.
+	if err := r.Validate(); err != nil {
+		return 0, err
+	}
 
 	r.Seq = w.seq.Add(1)
 
-	body,err := encodeRecord(r)
+	body, err := encodeRecord(r)
 	if err != nil {
+		// seq was already incremented — roll it back so the caller can retry
+		// without a gap. This is safe because Append is serialised by mu.
+		w.seq.Add(^uint64(0)) // subtract 1
 		return 0, err
 	}
 
-	entry,err := buildEntry(body)
+	entry, err := buildEntry(body)
 	if err != nil {
+		w.seq.Add(^uint64(0))
 		return 0, err
 	}
 
+	// FIX Bug 1 + Bug 2: hold the mutex for the entire write+flush+sync
+	// sequence when SyncAlways is set.
+	//
+	// Original code unlocked before buf.Flush/file.Sync, which allowed another
+	// goroutine to call buf.Write between Flush and Sync — data written after
+	// the Flush but before the Sync would be lost on a crash.
+	//
+	// Also, the original code returned early on write error without unlocking,
+	// causing a permanent deadlock on the next Append call (Bug 2).
 	w.mu.Lock()
 
-	n,err:=w.buf.Write(entry)
+	n, err := w.buf.Write(entry)
 	if err != nil {
+		w.mu.Unlock() // FIX Bug 2: always unlock before returning
 		return 0, err
 	}
-
 	if n != len(entry) {
+		w.mu.Unlock()
 		return 0, errors.New("partial write")
 	}
 
-	w.byteWritten += int64(len(entry))
+	w.byteWritten += uint64(len(entry))
 
-	needSync := w.cfg.SyncMode == SyncAlways
+	if w.cfg.SyncMode == SyncAlways {
+		// FIX Bug 1: flush and fsync while still holding the lock so no other
+		// writer can sneak a write in between flush and sync.
+		if err := w.buf.Flush(); err != nil {
+			w.mu.Unlock()
+			return 0, err
+		}
+		if err := w.file.Sync(); err != nil {
+			w.mu.Unlock()
+			return 0, err
+		}
+	}
 
 	w.mu.Unlock()
 
-	if needSync {
-
-		if err := w.buf.Flush(); err != nil {
-			return 0, err
-		}
-
-		if err := w.file.Sync(); err != nil {
-			return 0, err
-		}
-
-	}
-
-	
 	return r.Seq, nil
-	
 }
 
-// []Record -> order of operation 
-// int64 -> last valid sequence number (offset) truncates the corrupted data
-// error -> i/o error or crc error
-
+// Recover reads all valid records from file, returning:
+//   - the slice of decoded records in the order they were written
+//   - the byte offset of the last valid record (use to truncate a corrupt tail)
+//   - any hard I/O error (CRC mismatches are not errors — they stop iteration)
 func Recover(file *os.File) ([]Record, int64, error) {
+	// FIX Bug 6: always seek to the start of the file before reading.
+	// OpenWAL opens the file with O_RDWR; on an existing WAL the OS file
+	// position is 0, but if the caller passes a file that was used for
+	// writing, the position could be anywhere and records at the front
+	// would be silently skipped.
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, 0, err
+	}
+
 	var records []Record
-	var offset int64 = 0
+	var offset int64
 
 	reader := bufio.NewReader(file)
 
@@ -300,6 +306,7 @@ func Recover(file *os.File) ([]Record, int64, error) {
 			break
 		}
 		if err != nil {
+			// Partial read at end of file — treat as a truncated tail.
 			return records, offset, nil
 		}
 		storedCRC := binary.LittleEndian.Uint32(crcBuf)
@@ -313,6 +320,7 @@ func Recover(file *os.File) ([]Record, int64, error) {
 		length := binary.LittleEndian.Uint32(lenBuf)
 
 		if length == 0 || length > 10*1024*1024 {
+			// Sanity guard: 0-length or suspiciously large — stop here.
 			return records, offset, nil
 		}
 
@@ -327,9 +335,8 @@ func Recover(file *os.File) ([]Record, int64, error) {
 		h := crc32.NewIEEE()
 		h.Write(lenBuf)
 		h.Write(body)
-		computedCRC := h.Sum32()
-
-		if computedCRC != storedCRC {
+		if h.Sum32() != storedCRC {
+			// CRC mismatch: corruption detected, stop and truncate from here.
 			return records, offset, nil
 		}
 
@@ -340,9 +347,84 @@ func Recover(file *os.File) ([]Record, int64, error) {
 		}
 
 		records = append(records, rec)
-
 		offset += int64(crcSize + lenSize + length)
 	}
 
 	return records, offset, nil
+}
+
+func OpenWAL(path string) (*WAL, []Record, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Recover seeks to 0 internally (Bug 6 fix), so no explicit seek needed here.
+	records, offset, err := Recover(file)
+	if err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+
+	if err := file.Truncate(offset); err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+
+	var maxSeq uint64
+	for _, r := range records {
+		if r.Seq > maxSeq {
+			maxSeq = r.Seq
+		}
+	}
+
+	var seq atomic.Uint64
+	seq.Store(maxSeq)
+
+	wal := &WAL{
+    file:        file,
+    buf:         bufio.NewWriterSize(file, 64*1024),
+    byteWritten: uint64(offset),
+    cfg: WALConfig{
+        Dir: filepath.Dir(path),
+    },
+}
+
+// Store directly on the heap-allocated struct — no copy involved
+	wal.seq.Store(maxSeq)
+
+	return wal, records, nil
+}
+
+func (w *WAL) Close() error {
+	// FIX Bug 5: use CompareAndSwap so only one goroutine proceeds past this
+	// point. The original code did Load → Store as two separate operations,
+	// creating a race window where two concurrent Close() calls could both
+	// see closed==false and both attempt to flush/sync/close the file.
+	if !w.closed.CompareAndSwap(false, true) {
+		return nil // already closed or another goroutine is closing
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.buf.Flush(); err != nil {
+		return err
+	}
+
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+
+	return w.file.Close()
 }

@@ -315,7 +315,7 @@ These principles guide every design decision.
 
 ## 💾 Phase 4: The Storage Revolution (The LSM-Tree)
 
-- [] **25: Write-Ahead Log (WAL) –** Atomic append-only logging for crash recovery.
+- [x] **25: Write-Ahead Log (WAL) –** Atomic append-only logging for crash recovery.
 - [] **26: MemTables –** Designing in-memory sorted buffers (Skip-Lists/B-Trees).
 - [] **27: SSTables –** Immutable, disk-backed sorted string tables.
 - [] **28: The Compactor –** Background Merging (Leveled Compaction) to prevent bloat.

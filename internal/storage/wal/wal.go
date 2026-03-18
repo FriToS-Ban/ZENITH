@@ -215,20 +215,16 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 	default:
 	}
 
-	// FIX Bug 3: validate before consuming a sequence number.
-	// Previously seq.Add(1) ran before encodeRecord, so a rejected record
-	// burned a sequence number and created a gap that breaks ordering.
 	if err := r.Validate(); err != nil {
 		return 0, err
 	}
 
-	r.Seq = w.seq.Add(1)
 
 	body, err := encodeRecord(r)
 	if err != nil {
-		// seq was already incremented — roll it back so the caller can retry
-		// without a gap. This is safe because Append is serialised by mu.
-		w.seq.Add(^uint64(0)) // subtract 1
+
+		// Rollback if error is found
+		w.seq.Add(^uint64(0))
 		return 0, err
 	}
 
@@ -238,20 +234,13 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 		return 0, err
 	}
 
-	// FIX Bug 1 + Bug 2: hold the mutex for the entire write+flush+sync
-	// sequence when SyncAlways is set.
-	//
-	// Original code unlocked before buf.Flush/file.Sync, which allowed another
-	// goroutine to call buf.Write between Flush and Sync — data written after
-	// the Flush but before the Sync would be lost on a crash.
-	//
-	// Also, the original code returned early on write error without unlocking,
-	// causing a permanent deadlock on the next Append call (Bug 2).
 	w.mu.Lock()
+
+	r.Seq = w.seq.Add(1)
 
 	n, err := w.buf.Write(entry)
 	if err != nil {
-		w.mu.Unlock() // FIX Bug 2: always unlock before returning
+		w.mu.Unlock()
 		return 0, err
 	}
 	if n != len(entry) {
@@ -262,8 +251,6 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 	w.byteWritten += uint64(len(entry))
 
 	if w.cfg.SyncMode == SyncAlways {
-		// FIX Bug 1: flush and fsync while still holding the lock so no other
-		// writer can sneak a write in between flush and sync.
 		if err := w.buf.Flush(); err != nil {
 			w.mu.Unlock()
 			return 0, err
@@ -284,11 +271,6 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 //   - the byte offset of the last valid record (use to truncate a corrupt tail)
 //   - any hard I/O error (CRC mismatches are not errors — they stop iteration)
 func Recover(file *os.File) ([]Record, int64, error) {
-	// FIX Bug 6: always seek to the start of the file before reading.
-	// OpenWAL opens the file with O_RDWR; on an existing WAL the OS file
-	// position is 0, but if the caller passes a file that was used for
-	// writing, the position could be anywhere and records at the front
-	// would be silently skipped.
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
 	}
@@ -353,10 +335,15 @@ func Recover(file *os.File) ([]Record, int64, error) {
 	return records, offset, nil
 }
 
-func OpenWAL(path string) (*WAL, []Record, error) {
+func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if cfg.SyncMode == SyncPeriodic || cfg.SyncMode == SyncGroupCommit {
+		file.Close()
+		return nil, nil, errors.New("SyncPeriodic and SyncGroupCommit not yet implemented")
 	}
 
 	// Recover seeks to 0 internally (Bug 6 fix), so no explicit seek needed here.
@@ -407,12 +394,8 @@ func OpenWAL(path string) (*WAL, []Record, error) {
 }
 
 func (w *WAL) Close() error {
-	// FIX Bug 5: use CompareAndSwap so only one goroutine proceeds past this
-	// point. The original code did Load → Store as two separate operations,
-	// creating a race window where two concurrent Close() calls could both
-	// see closed==false and both attempt to flush/sync/close the file.
 	if !w.closed.CompareAndSwap(false, true) {
-		return nil // already closed or another goroutine is closing
+		return nil
 	}
 
 	w.mu.Lock()

@@ -1,6 +1,9 @@
 package analysis
 
-const MAX_DISTANCE = 3
+// MAX_DISTANCE is the maximum Levenshtein edit distance considered a fuzzy match.
+// This constant must be used consistently — in Levenshtein early termination
+// AND in BKTree.Search — so changing it in one place affects both.
+const MAX_DISTANCE = 2 // was 3 in original — aligned to what Search() actually used
 
 func Levenshtein(s1, s2 string) (int, bool) {
 
@@ -13,7 +16,7 @@ func Levenshtein(s1, s2 string) (int, bool) {
 	prevRow := make([]int, n+1)
 	currRow := make([]int, n+1)
 
-	// distance from an empty string (each block)
+	// distance from an empty string
 	for i := 0; i <= n; i++ {
 		prevRow[i] = i
 	}
@@ -26,15 +29,16 @@ func Levenshtein(s1, s2 string) (int, bool) {
 		for i := 1; i <= n; i++ {
 
 			cost = 1
-
 			if s1[i-1] == s2[j-1] {
 				cost = 0
 			}
 
-			// deletion , insertion , substitution
+			// deletion, insertion, substitution
 			currRow[i] = min(prevRow[i]+1, currRow[i-1]+1, prevRow[i-1]+cost)
 		}
 
+		// Early termination: if every value in currRow exceeds MAX_DISTANCE,
+		// no further rows can bring the distance back down — stop early.
 		stopCalculation := true
 		for _, val := range currRow {
 			if val <= MAX_DISTANCE {
@@ -46,6 +50,7 @@ func Levenshtein(s1, s2 string) (int, bool) {
 		if stopCalculation {
 			return 0, false
 		}
+
 		copy(prevRow, currRow)
 	}
 

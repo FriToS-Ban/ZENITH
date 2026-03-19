@@ -27,6 +27,7 @@ type Engine struct {
 	inverted  *InvertedIndex
 	vectors   *VectorStore
 	phonetics *PhoneticIndex
+	bkTree    *analysis.BKTree
 
 	embedder embedding.Embedder
 	scorer   ranking.Scorer
@@ -42,6 +43,7 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		inverted:  NewInvertedIndex(),
 		vectors:   NewVectorStore(),
 		phonetics: NewPhoneticIndex(),
+		bkTree:    analysis.NewBKTree(),
 		embedder:  emb,
 		scorer:    scr,
 		analyzer:  ana,
@@ -68,7 +70,7 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 
 	tempWordVectors := make(map[string]VectorEntry)
 	var tokensToEmbed []string
-	
+
 	for _, t := range rawTokens {
 		_, exists := tempWordVectors[t]
 		if !e.vectors.HasWordVector(t) && !exists {
@@ -179,6 +181,7 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 			L := len(token)
 			vocab[L] = append(vocab[L], token)
 			glob[token] = true
+			e.bkTree.Add(token)
 		}
 	}
 	idxFrags[internalID] = docFrags
@@ -217,9 +220,9 @@ func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, er
 
 	// Expansion phase condition
 	if len(ranks) == 0 || (len(ranks) > 0 && ranks[0].Score < 5.0) {
-		
-        // Network calls outside of internal engine index locks
-        var expandedTokens []string
+
+		// Network calls outside of internal engine index locks
+		var expandedTokens []string
 		for _, token := range rawTokens {
 			if len(token) >= 3 {
 				neighbors := e.getSemanticNeighbors(token, 5, 0.70)
@@ -260,7 +263,6 @@ func (e *Engine) lexicalPass(queryTokens []string) (map[uint32]float64, map[uint
 
 	idxData := e.inverted.GetData()
 	idxPhon := e.phonetics.GetData()
-	vocab := e.inverted.GetVocabulary()
 
 	for _, token := range queryTokens {
 		Q := len(token)
@@ -299,21 +301,18 @@ func (e *Engine) lexicalPass(queryTokens []string) (map[uint32]float64, map[uint
 
 		// 3. Fuzzy (Levenshtein)
 		if Q > 3 {
-			minL, maxL := Q-1, Q+1
-			for size, list := range vocab {
-				if size >= minL && size <= maxL {
-					for _, candidate := range list {
-						if dist, ok := analysis.Levenshtein(token, candidate); ok && dist > 0 && dist <= e.config.FuzzyMaxDist {
-							if ids, exists := idxData[candidate]; exists {
-								for _, id := range ids {
-									keywordScores[id] += 60.0 / float64(dist)
-									if matchTokens[id] == nil {
-										matchTokens[id] = make(map[string]bool)
-									}
-									matchTokens[id][token] = true
-								}
-							}
+			matches := e.bkTree.Search(token, e.config.FuzzyMaxDist)
+			for _, match := range matches {
+				if match.Distance == 0 {
+					continue // exact match already handled by n-gram path
+				}
+				if ids, exists := idxData[match.Word]; exists {
+					for _, id := range ids {
+						keywordScores[id] += 60.0 / float64(match.Distance)
+						if matchTokens[id] == nil {
+							matchTokens[id] = make(map[string]bool)
 						}
+						matchTokens[id][token] = true
 					}
 				}
 			}
@@ -360,9 +359,9 @@ func (e *Engine) neuralExpand(originalTokens []string, expandedTokens []string) 
 			if matchTokens[id] == nil {
 				matchTokens[id] = make(map[string]bool)
 			}
-            
-            // Map back onto the original query array context safely. 
-            // Realistically we'd trace neighbor->original parent
+
+			// Map back onto the original query array context safely.
+			// Realistically we'd trace neighbor->original parent
 			if len(originalTokens) > 0 {
 				matchTokens[id][originalTokens[0]] = true
 			}

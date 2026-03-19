@@ -23,7 +23,7 @@ const DefaultMaxSize = 64 * 1024 * 1024 // 64MB (Max Limit for Temp memory)
 type MemTable struct {
 	mu      sync.RWMutex
 	data    map[string]entry
-	size    int64
+	size    atomic.Int64
 	maxSize int64
 
 	// frozen is set to true when size >= maxSize.
@@ -38,10 +38,85 @@ type entry struct {
 	deleted bool
 }
 
-func NewMemTable(maxSize int64) *MemTable
+func NewMemTable(maxSize int64) *MemTable {
 
-func (m *MemTable) Put(key, value []byte) error // returns ErrFrozen if frozen
-func (m *MemTable) Delete(key []byte) error     // stores tombstone
+	if maxSize <= 0 {
+		maxSize = DefaultMaxSize
+	}
+
+	return &MemTable{
+		maxSize: maxSize,
+		data:    make(map[string]entry),
+	}
+}
+
+func (m *MemTable) Put(key, value []byte) error { // returns ErrFrozen if frozen
+
+	if len(key) == 0 {
+		return ErrKeyEmpty
+	}
+
+	if m.frozen.Load() {
+		return ErrFrozen
+	}
+
+	k := string(key)
+	v := make([]byte, len(value))
+	copy(v, value)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.frozen.Load() {
+		return ErrFrozen
+	}
+
+	prev, exists := m.data[k]
+	m.data[k] = entry{value: v, deleted: false}
+
+	if !exists {
+		m.size.Add(int64(len(k)) + int64(len(v)))
+	} else {
+		m.size.Add(int64(len(v)) - int64(len(prev.value)))
+	}
+
+	if m.Size() >= m.maxSize {
+		m.frozen.Store(true)
+	}
+
+	return nil
+
+}
+
+func (m *MemTable) Delete(key []byte) error { // stores tombstone
+
+	if len(key) == 0 {
+		return ErrKeyEmpty
+	}
+
+	k := string(key)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	value, exists := m.data[k]
+
+	m.data[k] = entry{deleted: true}
+
+	if !exists {
+		// wastage value
+		m.size.Add(int64(len(k)))
+	} else {
+		m.size.Add(-int64(len(value.value)))
+	}
+
+	if m.maxSize <= m.Size() {
+		m.frozen.Store(true)
+	}
+
+	return nil
+}
+
 func (m *MemTable) Get(key []byte) ([]byte, bool) { // false if missing or deleted
 
 	if len(key) == 0 {
@@ -63,8 +138,14 @@ func (m *MemTable) Get(key []byte) ([]byte, bool) { // false if missing or delet
 
 	return result, true
 }
-func (m *MemTable) IsFrozen() bool
-func (m *MemTable) Size() int64
+
+func (m *MemTable) IsFrozen() bool {
+	return m.frozen.Load()
+}
+
+func (m *MemTable) Size() int64 {
+	return m.size.Load()
+}
 
 // called during WAL recovery and in your engine's Write method
 func ApplyRecord(m *MemTable, r wal.Record) error {

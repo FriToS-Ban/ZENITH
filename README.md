@@ -309,7 +309,7 @@ These principles guide every design decision.
 - [x] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
 - [x] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
 - [x] **21: Phonetic Matching** - Soundex/Metaphone algorithms for "Sounds like" search.
-- [x] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.
+- [x] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.(Using BK trees)
 - [x] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
 - [] **24: Finite State Transducers (FST)** - Ultra-fast dictionary storage and prefix search.( Future enhancement)
 

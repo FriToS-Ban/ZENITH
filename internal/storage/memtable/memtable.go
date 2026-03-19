@@ -3,7 +3,10 @@
 package memtable
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -94,10 +97,18 @@ func (m *MemTable) Delete(key []byte) error { // stores tombstone
 		return ErrKeyEmpty
 	}
 
+	if m.IsFrozen() {
+		return ErrFrozen
+	}
+
 	k := string(key)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.IsFrozen() {
+		return ErrFrozen
+	}
 
 	value, exists := m.data[k]
 
@@ -123,8 +134,8 @@ func (m *MemTable) Get(key []byte) ([]byte, bool) { // false if missing or delet
 		return nil, false
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	e, exists := m.data[string(key)]
 
@@ -147,6 +158,47 @@ func (m *MemTable) Size() int64 {
 	return m.size.Load()
 }
 
+// SSTable data structure
+type Entry struct {
+	Key     []byte
+	Value   []byte // nil if Deleted is true
+	Deleted bool   // true = tombstone, must be written to SSTable
+	Seq     uint64 // sequence number, set from WAL — used to resolve conflicts during compaction
+}
+
+func (m *MemTable) Iterator() []Entry {
+	m.mu.RLock()
+	snapshot := make(map[string]entry, len(m.data))
+
+	for k, v := range m.data {
+		snapshot[k] = v
+	}
+
+	m.mu.RUnlock()
+
+	// Sort keys for SSTable — SSTables require keys in lexicographic order.
+	keys := make([]string, 0, len(snapshot))
+	for k := range snapshot {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys,
+		func(a, b string) int {
+			return cmp.Compare(a, b)
+		},
+	)
+
+	entries := make([]Entry, 0, len(keys))
+	for _, k := range keys {
+		e := snapshot[k]
+		entries = append(entries, Entry{
+			Key:     []byte(k),
+			Value:   e.value,
+			Deleted: e.deleted,
+		})
+	}
+	return entries
+}
+
 // called during WAL recovery and in your engine's Write method
 func ApplyRecord(m *MemTable, r wal.Record) error {
 	switch r.Op {
@@ -154,6 +206,7 @@ func ApplyRecord(m *MemTable, r wal.Record) error {
 		return m.Put(r.Key, r.Value)
 	case wal.OpTypeDelete:
 		return m.Delete(r.Key)
+	default:
+		return fmt.Errorf("memtable: unknown op type %d at seq %d", r.Op, r.Seq)
 	}
-	return nil
 }

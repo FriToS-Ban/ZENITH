@@ -316,8 +316,8 @@ These principles guide every design decision.
 ## 💾 Phase 4: The Storage Revolution (The LSM-Tree)
 
 - [x] **25: Write-Ahead Log (WAL) –** Atomic append-only logging for crash recovery.
-- [] **26: MemTables –** Designing in-memory sorted buffers (Skip-Lists/B-Trees).
+- [x] **26: MemTables –** Designing in-memory sorted buffers (Skip-Lists/B-Trees)(implemented using map will update later).
 - [] **27: SSTables –** Immutable, disk-backed sorted string tables.
 - [] **28: The Compactor –** Background Merging (Leveled Compaction) to prevent bloat.
-- [] **29: Bloom Filters –** Probabilistic data structures for $O(1)$ disk-lookup bypass.
-- [] **24: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables.
+- [x] **29: Bloom Filters –** Probabilistic data structures for $O(1)$ disk-lookup bypass.
+- [] **30: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables.

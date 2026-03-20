@@ -97,9 +97,6 @@ func encodeRecord(r *Record) ([]byte, error) {
 		return nil, err
 	}
 
-	// FIX Bug 8: key is encoded as uint16, so the guard must also be uint16 max,
-	// not MaxUint32. A key between 65536–MaxUint32 bytes would silently truncate
-	// the length field and produce a corrupt record that passes this check.
 	if len(r.Key) > math.MaxUint16 {
 		return nil, errors.New("key too large: max 65535 bytes")
 	}
@@ -218,7 +215,6 @@ func (w *WAL) Append(ctx context.Context, r *Record) (uint64, error) {
 	if err := r.Validate(); err != nil {
 		return 0, err
 	}
-
 
 	body, err := encodeRecord(r)
 	if err != nil {
@@ -379,15 +375,15 @@ func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 	seq.Store(maxSeq)
 
 	wal := &WAL{
-    file:        file,
-    buf:         bufio.NewWriterSize(file, 64*1024),
-    byteWritten: uint64(offset),
-    cfg: WALConfig{
-        Dir: filepath.Dir(path),
-    },
-}
+		file:        file,
+		buf:         bufio.NewWriterSize(file, 64*1024),
+		byteWritten: uint64(offset),
+		cfg: WALConfig{
+			Dir: filepath.Dir(path),
+		},
+	}
 
-// Store directly on the heap-allocated struct — no copy involved
+	// Store directly on the heap-allocated struct — no copy involved
 	wal.seq.Store(maxSeq)
 
 	return wal, records, nil

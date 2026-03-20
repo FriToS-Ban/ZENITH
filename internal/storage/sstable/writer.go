@@ -58,19 +58,41 @@ func newBloomFilter(expectedKeys int) *bloomFilter {
 
 // now converting the keys into hash using hash functions
 // very simple hash function is not very complete but just for bulding phase (will update it later)
+// func bloomHash(key []byte) (uint64, uint64) {
+// 	h := fnv.New64a()
+// 	h.Write(key)
+// 	h1 := h.Sum64()
+
+// 	h2 := h1*31 + 17
+
+// 	if h2 == 0 {
+// 		h2 = 1
+// 	}
+
+// 	return h1, h2
+
+// }
+
+// GPT generated ( Wangs 64 bit mixer) no idea how it works but main idea is id independent and deterministic h1 and h2
+
 func bloomHash(key []byte) (uint64, uint64) {
 	h := fnv.New64a()
 	h.Write(key)
 	h1 := h.Sum64()
 
-	h2 := h1*31 + 17
+	// Wang's 64-bit mixer — produces an independent h2 from h1.
+	// A linear transform like h1*31+17 is NOT independent and breaks
+	// the false-positive guarantees of double-hashing.
+	h2 := h1 ^ (h1 >> 30)
+	h2 *= 0xbf58476d1ce4e5b9
+	h2 ^= h2 >> 27
+	h2 *= 0x94d049bb133111eb
+	h2 ^= h2 >> 31
 
 	if h2 == 0 {
 		h2 = 1
 	}
-
 	return h1, h2
-
 }
 
 func (b *bloomFilter) add(key []byte) {
@@ -136,7 +158,7 @@ func NewWriter(filename string) (*Writer, error) {
 	}, nil
 }
 
-//  WriteALL -> writes all the entries which we get from the memtable iterator to the file
+//  WriteALL -> writes all the entries which we get from the memtable iterator to the file ✅
 //  WriteBlock -> writes all the entries in the block buffer to the file ✅
 //  WriteBloom -> writes the bloom filter to the file ✅
 //  WriteIndex -> writes the index of the blocks to the file ✅
@@ -212,9 +234,9 @@ func (w *Writer) writeIndex() (int, error) {
 
 		binary.LittleEndian.PutUint16(buf[0:2], uint16(len(indexentry.LastKey)))
 		copy(buf[2:], indexentry.LastKey)
-		baselength := len(indexentry.LastKey)
-		binary.LittleEndian.PutUint64(buf[2+baselength:10+baselength], indexentry.Offset)
-		binary.LittleEndian.PutUint32(buf[10+baselength:], indexentry.Size)
+		base := 2 + len(indexentry.LastKey)
+		binary.LittleEndian.PutUint64(buf[base:base+8], indexentry.Offset)
+		binary.LittleEndian.PutUint32(buf[base+8:base+12], indexentry.Size)
 
 		if _, err := w.buf.Write(buf); err != nil {
 			return total, err
@@ -237,7 +259,7 @@ func (w *Writer) writeBloom() (int, error) {
 	encoded := bf.encode()
 
 	if _, err := w.buf.Write(encoded); err != nil {
-		return 0, nil
+		return 0, err
 	}
 
 	w.offset += uint64(len(encoded))
@@ -260,7 +282,7 @@ func (w *Writer) writeFooter(f Footer) error {
 	if _, err := w.buf.Write(buf); err != nil {
 		return err
 	}
-	w.offset += FooterSize
+	w.offset += uint64(FooterSize)
 	return nil
 }
 
@@ -279,6 +301,8 @@ func (w *Writer) Close() error {
 	return w.file.Close()
 }
 
+// sstable architecture
+// [Data Blocks][Bloom][Index][Footer]
 func (w *Writer) WriteAll(entries []memtable.Entry) error {
 	if len(entries) == 0 {
 		return ErrEmptyTable
@@ -313,7 +337,7 @@ func (w *Writer) WriteAll(entries []memtable.Entry) error {
 		}
 	}
 
-	// ── Phase 2: Bloom Filter ────────────────────────────────────────────────
+	// ── Phase 2: Bloom Filter ──────────────────────────────────────────────
 	bloomOffset := w.offset
 	bloomSize, err := w.writeBloom()
 	if err != nil {

@@ -320,4 +320,4 @@ These principles guide every design decision.
 - [] **27: SSTables –** Immutable, disk-backed sorted string tables.
 - [] **28: The Compactor –** Background Merging (Leveled Compaction) to prevent bloat.
 - [x] **29: Bloom Filters –** Probabilistic data structures for $O(1)$ disk-lookup bypass.
-- [] **30: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables.
+- [x] **30: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables. (marked lastindex in writer)

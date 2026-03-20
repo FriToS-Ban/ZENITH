@@ -1,9 +1,13 @@
 package sstable
 
 import (
+	"bufio"
 	"encoding/binary"
 	"hash/fnv"
 	"math"
+	"os"
+
+	"github.com/shramanb113/ZENITH/internal/storage/memtable"
 )
 
 // Reader
@@ -92,3 +96,42 @@ func (b *bloomFilter) encode() []byte {
 	return buf
 
 }
+
+// Writer 
+
+type Writer struct {
+	file *os.File
+	buf  *bufio.Writer
+	
+	// offset of the current block
+	offset uint64
+	
+	// index of the blocks
+	index []IndexEntry
+
+	// keys of the blocks
+	keys [][]byte
+
+	// buffer for the current block (memtable entries)
+	blockbuf []memtable.Entry
+
+	// size of the current block (memtable size)
+	blocksize int
+
+}
+
+func NewWriter(filename string) (*Writer, error) {
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &Writer{
+		file:      file,
+		buf:       bufio.NewWriterSize(file,64*1024),
+		blockbuf: make([]memtable.Entry,0),
+		index:     make([]IndexEntry,0),
+		keys:      make([][]byte,0),
+	}, nil
+}
+
+

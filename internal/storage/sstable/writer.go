@@ -143,73 +143,11 @@ func NewWriter(filename string) (*Writer, error) {
 //  WriteFooter -> writes the footer of the file ✅
 //  Close -> closes the file ✅
 
-func (w *Writer) WriteAll(entries []memtable.Entry) error {
-	if len(entries) == 0 {
-		return ErrEmptyTable
-	}
-
-	// ── Phase 1: Data Blocks ─────────────────────────────────────────────────
-	for _, e := range entries {
-		// Collect key for bloom filter — defensive copy
-		key := make([]byte, len(e.Key))
-		copy(key, e.Key)
-		w.keys = append(w.keys, key)
-
-		// Accumulate into current block
-		w.blockbuf = append(w.blockbuf, e)
-
-		// Estimated encoded size of this entry:
-		// keyLen(2) + valLen(4) + deleted(1) + key + value
-		w.blocksize += 2 + 4 + 1 + len(e.Key) + len(e.Value)
-
-		// Flush when block is full
-		if w.blocksize >= BlockSize {
-			if err := w.writeBlock(); err != nil {
-				return fmt.Errorf("sstable: write block: %w", err)
-			}
-		}
-	}
-
-	// Flush any remaining entries that didn't fill a complete block.
-	if len(w.blockbuf) > 0 {
-		if err := w.writeBlock(); err != nil {
-			return fmt.Errorf("sstable: write final block: %w", err)
-		}
-	}
-
-	// ── Phase 2: Bloom Filter ────────────────────────────────────────────────
-	bloomOffset := w.offset
-	bloomSize, err := w.writeBloom()
-	if err != nil {
-		return fmt.Errorf("sstable: write bloom: %w", err)
-	}
-
-	// ── Phase 3: Index Block ─────────────────────────────────────────────────
-	indexOffset := w.offset
-	indexSize, err := w.writeIndex()
-	if err != nil {
-		return fmt.Errorf("sstable: write index: %w", err)
-	}
-
-	// ── Phase 4: Footer ──────────────────────────────────────────────────────
-	if err := w.writeFooter(Footer{
-		IndexOffset: indexOffset,
-		IndexSize:   uint32(indexSize),
-		BloomOffset: bloomOffset,
-		BloomSize:   uint32(bloomSize),
-		EntryCount:  uint64(len(entries)),
-		Magic:       [4]byte{'Z', 'S', 'S', 'T'},
-	}); err != nil {
-		return fmt.Errorf("sstable: write footer: %w", err)
-	}
-
-	return nil
-}
-
 // Each entry
 // keylen(2) | valueLen(4) | deleted(0 or 1) | key byte array | value byte array
 // after that for header it will have crc check and the body encoded body in bytes
 // and for sparse indexing the last key is stored in the writer as lastkey will point to that block
+
 func (w *Writer) writeBlock() error {
 	var encoded []byte
 
@@ -339,4 +277,67 @@ func (w *Writer) Close() error {
 	}
 
 	return w.file.Close()
+}
+
+func (w *Writer) WriteAll(entries []memtable.Entry) error {
+	if len(entries) == 0 {
+		return ErrEmptyTable
+	}
+
+	// ── Phase 1: Data Blocks ─────────────────────────────────────────────────
+	for _, e := range entries {
+		// Collect key for bloom filter — defensive copy
+		key := make([]byte, len(e.Key))
+		copy(key, e.Key)
+		w.keys = append(w.keys, key)
+
+		// Accumulate into current block
+		w.blockbuf = append(w.blockbuf, e)
+
+		// Estimated encoded size of this entry:
+		// keyLen(2) + valLen(4) + deleted(1) + key + value
+		w.blocksize += 2 + 4 + 1 + len(e.Key) + len(e.Value)
+
+		// Flush when block is full
+		if w.blocksize >= BlockSize {
+			if err := w.writeBlock(); err != nil {
+				return fmt.Errorf("sstable: write block: %w", err)
+			}
+		}
+	}
+
+	// Flush any remaining entries that didn't fill a complete block.
+	if len(w.blockbuf) > 0 {
+		if err := w.writeBlock(); err != nil {
+			return fmt.Errorf("sstable: write final block: %w", err)
+		}
+	}
+
+	// ── Phase 2: Bloom Filter ────────────────────────────────────────────────
+	bloomOffset := w.offset
+	bloomSize, err := w.writeBloom()
+	if err != nil {
+		return fmt.Errorf("sstable: write bloom: %w", err)
+	}
+
+	// ── Phase 3: Index Block ─────────────────────────────────────────────────
+	indexOffset := w.offset
+	indexSize, err := w.writeIndex()
+	if err != nil {
+		return fmt.Errorf("sstable: write index: %w", err)
+	}
+
+	// ── Phase 4: Footer ──────────────────────────────────────────────────────
+	if err := w.writeFooter(Footer{
+		IndexOffset: indexOffset,
+		IndexSize:   uint32(indexSize),
+		BloomOffset: bloomOffset,
+		BloomSize:   uint32(bloomSize),
+		EntryCount:  uint64(len(entries)),
+		Magic:       [4]byte{'Z', 'S', 'S', 'T'},
+	}); err != nil {
+		return fmt.Errorf("sstable: write footer: %w", err)
+	}
+
+	return nil
 }

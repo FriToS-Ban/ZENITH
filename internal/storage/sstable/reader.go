@@ -3,6 +3,7 @@ package sstable
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 )
 
@@ -64,4 +65,60 @@ type Reader struct {
 	footer Footer
 	index  []IndexEntry
 	bloom  BloomReader
+}
+
+func (r *Reader) readBloom() error {
+
+}
+func (r *Reader) readIndex() error {
+
+}
+func (r *Reader) readFooter() error {
+
+}
+
+func OpenReader(path string) (*Reader, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("sstable: open: %w", err)
+	}
+
+	r := &Reader{file: f}
+
+	if err := r.readFooter(); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	if err := r.readBloom(); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	if err := r.readIndex(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// ─── Get ──────────────────────────────────────────────────────────────────────
+
+// Get returns the value for key and true if found and not a tombstone.
+// Returns (nil, false) if the key is not present or has been deleted.
+
+func (r *Reader) Get(key []byte) ([]byte, bool)
+
+func (r *Reader) findBlock(key []byte) int
+
+type blockEntry struct {
+	key     []byte
+	value   []byte
+	deleted bool
+}
+
+func (r *Reader) readBlock(entry IndexEntry) ([]blockEntry, error)
+
+func (r *Reader) Close() error {
+	return r.file.Close()
 }

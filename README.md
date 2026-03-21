@@ -317,7 +317,7 @@ These principles guide every design decision.
 
 - [x] **25: Write-Ahead Log (WAL) –** Atomic append-only logging for crash recovery.
 - [x] **26: MemTables –** Designing in-memory sorted buffers (Skip-Lists/B-Trees)(implemented using map will update later).
-- [] **27: SSTables –** Immutable, disk-backed sorted string tables.
+- [x] **27: SSTables –** Immutable, disk-backed sorted string tables. ( even though done ... needs some improvement such as group commiter)
 - [] **28: The Compactor –** Background Merging (Leveled Compaction) to prevent bloat.
 - [x] **29: Bloom Filters –** Probabilistic data structures for $O(1)$ disk-lookup bypass.
 - [x] **30: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables. (marked lastindex in writer)

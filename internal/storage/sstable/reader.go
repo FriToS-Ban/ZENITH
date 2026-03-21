@@ -1,9 +1,12 @@
 package sstable
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"os"
 )
 
@@ -208,9 +211,29 @@ func OpenReader(path string) (*Reader, error) {
 // Get returns the value for key and true if found and not a tombstone.
 // Returns (nil, false) if the key is not present or has been deleted.
 
-func (r *Reader) Get(key []byte) ([]byte, bool)
+// binary searching the block (sorted is the advantage here)
+func (r *Reader) findBlock(key []byte) int {
 
-func (r *Reader) findBlock(key []byte) int
+	lo, hi := 0, len(r.index)-1
+
+	for lo <= hi {
+		mid := int(lo + (hi-lo)/2)
+
+		cmp := bytes.Compare(r.index[mid].LastKey, key)
+
+		if cmp > 0 {
+			hi = mid - 1
+		} else {
+			lo = mid + 1
+		}
+
+	}
+
+	if lo >= len(r.index) {
+		return -1 // key is beyond the largest key in the SSTable
+	}
+	return lo
+}
 
 type blockEntry struct {
 	key     []byte
@@ -218,7 +241,104 @@ type blockEntry struct {
 	deleted bool
 }
 
-func (r *Reader) readBlock(entry IndexEntry) ([]blockEntry, error)
+func (r *Reader) readBlock(entry IndexEntry) ([]blockEntry, error) {
+	buf := make([]byte, entry.Size)
+
+	// reading from the indexed
+	if _, err := r.file.ReadAt(buf, int64(entry.Offset)); err != nil {
+		if err == io.EOF {
+			return nil, ErrBlock
+		}
+
+		return nil, fmt.Errorf("sstable: read block at %d: %w", entry.Offset, err)
+	}
+
+	if len(buf) < 6 {
+		return nil, ErrBlock
+	}
+
+	storedCRC := binary.LittleEndian.Uint32(buf[0:4])
+	entryCount := int(binary.LittleEndian.Uint16(buf[4:6]))
+	payload := buf[6:]
+
+	if crc32.ChecksumIEEE(payload) != storedCRC {
+		return nil, ErrBlock
+	}
+
+	entries := make([]blockEntry, 0, entryCount)
+	pos := 0
+
+	for i := 0; i < entryCount; i++ {
+
+		//  pos + 4 for storedCRC + 2 for block length
+		if pos+7 > len(payload) {
+			return nil, ErrBlock
+		}
+
+		keyLen := int(binary.LittleEndian.Uint16(payload[pos : pos+2]))
+		valLen := int(binary.LittleEndian.Uint32(payload[pos+2 : pos+6]))
+		deleted := payload[pos+6] == 1
+		pos += 7
+
+		if (pos + keyLen + valLen) > len(payload) {
+			return nil, ErrBlock
+		}
+
+		key := make([]byte, keyLen)
+		copy(key, payload[pos:pos+keyLen])
+		pos += keyLen
+
+		var value []byte
+		if valLen > 0 {
+			value = make([]byte, valLen)
+			copy(value, payload[pos:pos+valLen])
+		}
+		pos += valLen
+
+		entries = append(entries, blockEntry{
+			key:     key,
+			value:   value,
+			deleted: deleted,
+		})
+
+	}
+	return entries, nil
+}
+
+func (r *Reader) Get(key []byte) ([]byte, bool) {
+
+	// bloom filter search (if not found then we dont even need to scratch the disk)
+	if !r.bloom.mayContain(key) {
+		return nil, false
+	}
+
+	blockIdx := r.findBlock(key)
+	if blockIdx < 0 {
+		return nil, false
+	}
+
+	entries, err := r.readBlock(r.index[blockIdx])
+
+	if err != nil {
+		return nil, false
+	}
+
+	for _, e := range entries {
+		if bytes.Equal(e.key, key) {
+			if e.deleted {
+				// Tombstone — key was deleted, do not fall through
+				return nil, false
+			}
+			// Defensive copy — caller must not mutate stored data
+			val := make([]byte, len(e.value))
+			copy(val, e.value)
+			return val, true
+		}
+	}
+
+	return nil, false
+
+}
 
 func (r *Reader) Close() error {
 	return r.file.Close()

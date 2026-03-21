@@ -12,6 +12,7 @@ var (
 	ErrBlock  = errors.New("sstable corrupt : block CRC mismatch")
 	ErrBloom  = errors.New("sstable: corrupt bloom filter")
 	ErrHeader = errors.New("sstable : Header mismatch or corrupt")
+	ErrIndex  = errors.New("sstable : corrupt Index")
 )
 
 type BloomReader struct {
@@ -64,16 +65,116 @@ type Reader struct {
 	file   *os.File
 	footer Footer
 	index  []IndexEntry
-	bloom  BloomReader
+	bloom  *BloomReader
 }
 
+// referring from the function from writeBloom in writer.go
 func (r *Reader) readBloom() error {
 
-}
-func (r *Reader) readIndex() error {
+	if r.footer.BloomSize == 0 {
+		return ErrBloom
+	}
+
+	buf := make([]byte, r.footer.BloomSize)
+	if _, err := r.file.ReadAt(buf, int64(r.footer.BloomOffset)); err != nil {
+		return fmt.Errorf("sstable: read bloom: %w", err)
+	}
+
+	br, err := decode(buf)
+
+	if err != nil {
+		return err
+	}
+
+	r.bloom = br
+
+	return nil
 
 }
+
+// referring from the function writeIndex in writer.go
+func (r *Reader) readIndex() error {
+
+	if r.footer.IndexSize == 0 {
+		return ErrIndex
+	}
+
+	buf := make([]byte, r.footer.IndexSize)
+	if _, err := r.file.ReadAt(buf, int64(r.footer.IndexOffset)); err != nil {
+		return fmt.Errorf("sstable: read index: %w", err)
+	}
+
+	r.index = make([]IndexEntry, 0)
+	pos := 0
+
+	for pos < len(buf) {
+
+		if pos+2 > len(buf) {
+			return fmt.Errorf("Keylen corrupted in index")
+		}
+
+		keyLen := binary.LittleEndian.Uint16(buf)
+		pos += 2
+
+		// keylen(2) , key array(keylen which we extracted) , offset(8) + size (4)
+		if pos+int(keyLen)+12 > len(buf) {
+			return ErrIndex
+		}
+
+		lastKey := make([]byte, keyLen)
+		copy(lastKey, buf[pos:pos+int(keyLen)])
+		pos += int(keyLen)
+
+		offset := binary.LittleEndian.Uint64(buf[pos : pos+8])
+		pos += 8
+
+		size := binary.LittleEndian.Uint32(buf[pos : pos+4])
+		pos += 4
+
+		r.index = append(r.index, IndexEntry{
+			LastKey: lastKey,
+			Offset:  offset,
+			Size:    size,
+		})
+
+	}
+
+	return nil
+
+}
+
+// similarly referring from writeFooter in writer.go
 func (r *Reader) readFooter() error {
+
+	info, err := r.file.Stat()
+
+	if err != nil {
+		return fmt.Errorf("sstable: stat: %w", err)
+	}
+
+	if info.Size() < FooterSize {
+		return ErrFooter
+	}
+
+	buf := make([]byte, FooterSize)
+	if _, err := r.file.ReadAt(buf, info.Size()-int64(FooterSize)); err != nil {
+		return fmt.Errorf("sstable: read footer: %w", err)
+	}
+
+	if string(buf[32:36]) != MagicBytes {
+		return ErrFooter
+	}
+
+	r.footer = Footer{
+		IndexOffset: binary.LittleEndian.Uint64(buf[0:8]),
+		IndexSize:   binary.LittleEndian.Uint32(buf[8:12]),
+		BloomOffset: binary.LittleEndian.Uint64(buf[12:20]),
+		BloomSize:   binary.LittleEndian.Uint32(buf[20:24]),
+		EntryCount:  binary.LittleEndian.Uint64(buf[24:32]),
+	}
+	copy(r.footer.Magic[:], buf[32:36])
+
+	return nil
 
 }
 

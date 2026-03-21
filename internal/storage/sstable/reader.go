@@ -26,7 +26,6 @@ type BloomReader struct {
 
 // [numBits(4)][numHash(1)][bitset bytes...]
 func decode(data []byte) (*BloomReader, error) {
-
 	if len(data) < 5 {
 		return nil, ErrBloom
 	}
@@ -42,7 +41,7 @@ func decode(data []byte) (*BloomReader, error) {
 
 	bits := make([]uint64, expectedWords)
 	for i := 0; i < expectedWords; i++ {
-		bits[i] = binary.LittleEndian.Uint64(bitsetBytes[5+8*i:])
+		bits[i] = binary.LittleEndian.Uint64(bitsetBytes[i*8:])
 	}
 
 	return &BloomReader{
@@ -50,7 +49,6 @@ func decode(data []byte) (*BloomReader, error) {
 		numsBits: numBits,
 		numsHash: numHash,
 	}, nil
-
 }
 
 func (b *BloomReader) mayContain(key []byte) bool {
@@ -116,7 +114,7 @@ func (r *Reader) readIndex() error {
 			return fmt.Errorf("Keylen corrupted in index")
 		}
 
-		keyLen := binary.LittleEndian.Uint16(buf)
+		keyLen := binary.LittleEndian.Uint16(buf[pos : pos+2])
 		pos += 2
 
 		// keylen(2) , key array(keylen which we extracted) , offset(8) + size (4)
@@ -221,10 +219,10 @@ func (r *Reader) findBlock(key []byte) int {
 
 		cmp := bytes.Compare(r.index[mid].LastKey, key)
 
-		if cmp > 0 {
-			hi = mid - 1
-		} else {
+		if cmp < 0 {
 			lo = mid + 1
+		} else {
+			hi = mid - 1
 		}
 
 	}

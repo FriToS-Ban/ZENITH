@@ -1,323 +1,302 @@
-# ZENITH - A Next Genration Search and Recommendation Engine
+# ZENITH
 
-> From lexical matching to true understanding
+> A local-first semantic search engine with an LSM-backed index, written in Go.
 
----
+ZENITH is a CLI tool that indexes your local files and makes them searchable — not just by keyword, but by meaning. Point it at a directory, and you can query it with natural language. It understands intent, tolerates typos, and ranks results using hybrid lexical + semantic scoring.
 
-## 1. The Taxonomy of Research
+Under the hood, ZENITH is built on a storage engine written from scratch: a full LSM-tree pipeline (WAL → MemTable → SSTable → Bloom filters), a BK-tree fuzzy matcher, an RRF-based hybrid ranker, and an optional gRPC server for remote access. Every component is instrumented with Prometheus metrics and OpenTelemetry traces.
 
-- Search is ofen treated as a single problem. It is not.
-- It is a **spectrum of intent**, and each layer solves a fundamentally different question
-
-### 1.1 The Lexical Search - "Does the exact text match?"
-
-- **Defintion** - Lexical Searching is about matching a sequence of characters excatly or a slight variant maybe in cases as given by the user.
-
-> "Where does this word appear in the given document?"
-
-**Example :-**
-
-- Query : `Apple`
-- Matches :
-  - `I ate an apple yesterday.`
-  - `Apple watches are great.`
-
-**How it works :-**
-
-- Tokenization
-- BM25 / TF-ID scoring
-- Inverted Indexes
-
-**Strengths :-**
-
-- Extremely Fast
-- Precise for exact terminology
-- Deterministic and explainable
-
-**Limitations :-**
-
-- No understanding of meaning
-- Cannot generalize beyond seen words
-- Fails on paraphrase and intent
-
-**Mental Model**
-
-> Lexical Search hears **sounds** , not **ideas**.
+This is not a wrapper around Elasticsearch or a vector database. It is a ground-up implementation of the primitives that make search work.
 
 ---
 
-### 1.2 Semantic Search - "What does this mean"
+## Quick Start
 
-- **Definiton -** Semantic search is about **meaning matching**. It represents text as points in a high-dimensional space and answers:
+```bash
+# Install
+go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 
-> "What concepts are similar to this idea?"
+# Index a directory
+zenith index ~/Documents
 
-**Examples :**
+# Search by meaning
+zenith search "kubernetes memory debugging"
 
-- Query : `"Red Crunchy Fruit"` -> apple
+# Typo-tolerant fuzzy search
+zenith search --fuzzy "kubrnets deplymnt"
 
-- Query : `"IPhone Maker"` -> Apple Inc
-
-- Query : `"language for fasr backend services"` -> Go (😊)
-
-**How it works :**
-
-- Natural Embeddings
-
-- Vector similarity (cosine/dot product)
-
-- Approximate Mearest Neighbor (ANN) indexes
+# Start gRPC server for remote access
+zenith serve --port 50051
+```
 
 ---
 
-### 1.3 Personlized Recommendation - "Who is asking?"
+## Why ZENITH Exists
 
-- **Definition** - Personalized recommendation incorported **context and identity**. It answers:
+Most search tools make one of two tradeoffs:
 
-> "What is the most relevant result result for this ser right now?"
+- **Elasticsearch** — powerful, but vector search is bolted on, not native. Two scoring pipelines that don't compose cleanly. Memory-hungry at scale. Configuration-heavy for advanced use cases.
+- **Vector databases** — great for semantic recall, but lose lexical precision. No concept of "exact match matters here."
 
-**Examples**
+ZENITH treats hybrid search as the foundation, not a feature. A single query pipeline scores both lexical and semantic signals and merges them with Reciprocal Rank Fusion. You get exact match precision without sacrificing semantic recall.
 
-- A backend engineer searching `"Apple"` -> _Apple Silicon performance benchmarks_
-
-- A nutritionist searching `"Apple"` -> _Nutritional breakdown_
-
-- A student searching `"Apple"` -> _Company overview_
-
-**Signals Used :**
-
-- Past searches
-- Click Behaviors
-- Dwell Time
-- User preferences
-- Similar users (collaborative signals)
-
-**Key Shifts**
-
-Search is no lnger just **document** -> **query**
-
-It becomes:
-
-`(user,context,query) -> ranked results`
-
-**Mental Model**
-
-> Recommendation is **search with memory**
+For local use, it also means zero infrastructure — no Elasticsearch cluster, no managed vector DB, no cloud bill. Your index lives on disk in ZENITH's own LSM storage format.
 
 ---
 
-## 2. The Critique of the Giants (ElasticSearch in the AI Era)
+## Architecture
 
-- Elastic is an engineering masterpiece of the **lexical era**.
-
-- However . modern AI-driven Search exposes Strucutral cracks.
-
-Below are **three concrete problem areas**.
-
----
-
-### 2.1 Vector-Lexical Hybridity is Bolted On, Not Native
-
-**Problem :**
-
-- ElasticSearch was designed around Inverted indexes
-
-- Vector earch was added later as a parallel systems
-
-**Consequences :**
-
-- Two scoring pipelines that don't naturally compose
-
-- Awkward hybrid scoring logic
-
-- Limited control over fusion startegies
-
-**Real Impact :**
-
-- Engineers must choose between :
-  - Keyword precision or
-  - Semantic recall
-
-- True Hybrid Relevance is dificult to tune and explain
-
-**Zenith Insight**
-
-> Hybrid search should be foundational , not an afterthought.
-
----
-
-### 2.2 Cost of Scale is Disproportionate
-
-**Problem :**
-
-- ElasticSearch is memory-hungry
-- Scaling requires :
-  - More nodes
-  - More Replicas
-  - More operational complexity
-
-**Why this Hurts**
-
-- Vector indexes multiply memory usage.
-
-- ANN structures shard cleanly,
-
-- Query fan-out grows aggressively with data size.
-
-**Real Imapct**
-
-- Small teams cannot afford large-scale semantic search
-
-- Infra cost grows faster than data growth
-
-**Zenith Insight**
-
-> Search engines should **scale with data**, not **against budgets**.
+```
+zenith index <path>
+      │
+      ▼
+┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
+│   Crawler   │────▶│   Analyzer   │────▶│    Embedder     │
+│  (fsnotify) │     │  (tokenizer, │     │  (Ollama local  │
+│             │     │   stemmer,   │     │   or OpenAI)    │
+│             │     │   n-grams,   │     │                 │
+│             │     │   phonetic)  │     │  → []float32    │
+└─────────────┘     └──────────────┘     └────────┬────────┘
+                                                   │
+                          ┌────────────────────────┘
+                          ▼
+                  ┌───────────────┐
+                  │  LSM Storage  │
+                  │               │
+                  │  WAL (crash   │
+                  │  recovery)    │
+                  │  MemTable     │
+                  │  (skip-list)  │
+                  │  SSTable      │
+                  │  (immutable)  │
+                  │  Bloom filter │
+                  │  Sparse index │
+                  └───────┬───────┘
+                          │
+zenith search <query>     │
+      │                   ▼
+      │           ┌───────────────┐
+      │           │  Query Engine │
+      ├──────────▶│               │
+      │  lexical  │  BM25 scoring │
+      │           │  BK-tree      │
+      │           │  fuzzy match  │
+      │           │  Vector cosine│
+      │           │  similarity   │
+      │           │               │
+      │           │  RRF fusion   │
+      │           │  → ranked     │
+      │           │    results    │
+      │           └───────────────┘
+      │
+      └──▶ zenith serve → gRPC server (remote clients)
+```
 
 ---
 
-### 2.3 Ease of Use Breaks Down at Advance Use Cases
+## Storage Engine
 
-**Problems :**
+ZENITH's index is backed by a full LSM-tree implementation — the same architecture used by RocksDB, LevelDB, and etcd's backend storage. Nothing is outsourced to SQLite or an embedded key-value library.
 
-- ElasticSearch is powerful, but :
-  - Configuration heavy
-  - Steep learning curve
-  - Many "magic numbers"
+| Component | Implementation | Status |
+|---|---|---|
+| Write-Ahead Log | Append-only, crash-safe | ✅ |
+| MemTable | Skip-list (sorted, O(log n) ops) | 🔧 in progress |
+| SSTable | Immutable disk-backed sorted tables | ✅ |
+| Compactor | Leveled compaction, background merge | 🔲 planned |
+| Bloom Filter | Probabilistic O(1) disk-lookup bypass | ✅ |
+| Sparse Index | Memory-efficient offset map for SSTables | ✅ |
 
-**Examples :**
-
-- Shard counts chosen upfront
-- Reindexing required for schema validation
-- Manual tuning for performance
-
-**In the AI Era**
-
-- Team want:
-  - Plug-and-play embeddings
-  - Automatic relevance tuning
-  - Opinionated defaults
-
-**Zenith Insight**
-
-> Advanced systems should feel **simple**, not fragile
+The WAL guarantees that no indexed document is lost on crash. Bloom filters mean queries never hit disk for documents that don't exist. Compaction keeps read amplification bounded as the index grows.
 
 ---
 
-## 3. The Zenith North Bar
+## Search Pipeline
 
-- Zenith is not "ElasticSearch + AI"
-- It is a **re-imagining of search as an intelligent system**.
+### Lexical Layer
+- Inverted index with BM25/TF-IDF scoring
+- Porter stemming (`jumping` → `jump`)
+- Edge N-grams for prefix / search-as-you-type
+- Phonetic matching via Soundex/Metaphone
+- Synonym expansion
 
-These principles guide every design decision.
+### Fuzzy Layer
+- BK-tree over Levenshtein distance — O(log n) lookup with edit-distance pruning
+- Tolerates up to `MAX_DISTANCE` edits (configurable)
+- Integrated into both indexing and query paths
 
----
+### Semantic Layer
+- Local embeddings via Ollama (`nomic-embed-text`, runs fully offline)
+- Optional OpenAI embeddings (`--embedder openai`)
+- Cosine similarity + L2 distance
+- Deterministic hash embeddings as fallback (no Ollama required)
 
-### Principle 1 — Hybrid-First, Not Vector-Optional
-
-**Statement**
-
-> Lexical and semantic search are peers, not competitors
-
-**Implications**
-
-- Single query pipeline
-- Unified scoring model
-- First-class hybrid ranking
-
-**Outcome**
-
-- Exact matches stay exact
-- Meaning improves recall
-- no tradeoff required
+### Ranking
+- Reciprocal Rank Fusion (RRF) merges lexical and semantic result lists
+- Score normalization before fusion
+- Weighted fusion tunable via config
 
 ---
 
-### Principle 2 — Distributed State Without Ceremony
+## Observability
 
-**Statement**
+ZENITH instruments itself the way a production service should. When running `zenith serve`, the following are exposed:
 
-> Distribution should be invisible to the user.
+**Prometheus metrics** (`/metrics` on configurable port):
 
-**Implications**
+| Metric | Description |
+|---|---|
+| `zenith_index_duration_seconds` | Time to index each file, by file type |
+| `zenith_search_latency_seconds` | Query latency by search mode (lexical / semantic / hybrid) |
+| `zenith_indexed_documents_total` | Total documents in the index |
+| `zenith_embedding_calls_total` | Embedder invocations and errors |
+| `zenith_wal_writes_total` | WAL append operations |
+| `zenith_bloom_filter_hits_total` | Bloom filter hit/miss ratio |
 
-- Automatic sharding
-- Replica management without manual testing
-- Stateless quey coordination
+**OpenTelemetry traces**: spans across the full query path — `crawler.Walk` → `embedder.Embed` → `storage.Write` → `search.Query` → `ranker.RRF`. Export to any OTLP-compatible backend (Grafana Tempo, Jaeger).
 
-**Outcome**
+Run the full local observability stack:
 
-- Zero-config cluster bootstrap
-- No "how many shards?" questions
-- Systems scale naturally with load
-
----
-
-### Principle 3 - Sub-10ms Intelligence
-
-**Statement**
-
-> AI relevance must be fast enough to feel instant
-
-**Implications**
-
-- ANN-optimized vector indexes
-- Pre-computed embeddings
-- Cache-aware execution
-
-**Outcome**
-
-- Semantic + Lexical scoring under 10ms
-- AI without latency guilt
-- Suitable for real-time products
+```bash
+make dev-stack   # boots Prometheus + Grafana + Tempo via docker-compose
+zenith serve --metrics-port 9090 --tracing-endpoint localhost:4317
+```
 
 ---
 
-## Closing Thought
+## File Support
 
-- ElasticSearch solved **searching words at scale**.
-- Zenith aims to solve **finding meaning, intent, and relevance at scale**.
+| Format | Extraction |
+|---|---|
+| `.txt`, `.md` | Direct text |
+| `.go`, `.py`, `.ts` | Source code (comment + identifier extraction) |
+| `.pdf` | Text layer extraction |
+| `.html` | Tag-stripped text |
 
-- This project is not about replacing a tool.
-- It is about **advancing the dsicipline of search itself.**
+ZENITH watches indexed directories with `fsnotify`. Changed files are re-indexed incrementally using mtime + content hash — not full re-crawls.
 
 ---
 
-## 🏔️ The ZENITH 50-Step Ascent:: The Definitive Roadmap
+## gRPC API
 
-## 🧱 Phase 1: The Core Foundation (The Skeleton)
+`zenith serve` exposes the full search and indexing API over gRPC. The Protobuf contract is in `gen/go/zenithproto/`.
 
-- [x] **01-03:** Inverted Index architecture & Map-based postings lists.
-- [x] **04-05:** Standard Tokenization, Stop-word filtering, and Lowercasing.
-- [x] **06-07:** gRPC Service definition and Protobuf contract design.
-- [x] **08-09:** Thread-safety implementation using sync.RWMutex.
-- [x] **10:** Concurrent Indexing via Worker Pools & Load Generation.
-- [x] **11:** The Vault – Binary persistence with encoding/gob & Graceful Shutdown. ✅
+```protobuf
+service ZenithService {
+  rpc IndexDocument(IndexRequest) returns (IndexResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc FuzzySearch(FuzzyRequest) returns (SearchResponse);
+  rpc HybridSearch(HybridRequest) returns (SearchResponse);
+  rpc GetStats(StatsRequest) returns (StatsResponse);
+}
+```
 
-## 🧠 Phase 2: Neural Intelligence (The Brain)
+---
 
-- [x] **12: The Great Split**- Distributed Coordinator & Modulo Sharding.
-- [x] **13: Neural Storage** - Vector map integration & High-dimensional schema.
-- [x] **14: Linear Algebra** - Implementing Dot Product and Magnitude in pure Go.
-- [x] **15: The Similarity Engine** - Implementing Cosine Similarity & L2 Distance.
-- [x] **16: Deterministic Embeddings** - Creating a "Concept-to-Vector" hash transformer.
-- [x] **17: Hybrid Ranking** - Score normalization and Weighted Fusion (Keyword + Vector).
-- [x] **18: Reciprocal Rank Fusion (RRF)** - Advanced rank-merging for multi-modal search.
+## Build Roadmap
 
-## 🧪 Phase 3: Linguistic Mastery (The Linguist)
+### ✅ Phase 1 — Core Foundation
+- [x] Inverted index, map-based postings lists
+- [x] Tokenization, stop-word filtering, lowercasing
+- [x] gRPC service definition and Protobuf contract
+- [x] Thread-safety via `sync.RWMutex`
+- [x] Concurrent indexing via worker pools
+- [x] Binary persistence with `encoding/gob` and graceful shutdown
 
-- [x] **19 : Porter Stemming** – Reducing words to their roots (e.g., "jumping" -> "jump").
-- [x] **20: Edge N-Grams** – Breaking words into sub-tokens for "Search-as-you-type.
-- [x] **21: Phonetic Matching** - Soundex/Metaphone algorithms for "Sounds like" search.
-- [x] **22: Fuzzy Matching** - Levenshtein Distance for typo-tolerant queries.(Using BK trees)
-- [x] **23: Synonyms & Thesaurus** - Expanding query intent via mapping layers.
-- [] **24: Finite State Transducers (FST)** - Ultra-fast dictionary storage and prefix search.( Future enhancement)
+### ✅ Phase 2 — Neural Intelligence
+- [x] Distributed coordinator and modulo sharding
+- [x] Vector map integration and high-dimensional schema
+- [x] Dot product and magnitude in pure Go
+- [x] Cosine similarity and L2 distance
+- [x] Deterministic hash embeddings
+- [x] Hybrid ranking with score normalization and weighted fusion
+- [x] Reciprocal Rank Fusion (RRF)
 
-## 💾 Phase 4: The Storage Revolution (The LSM-Tree)
+### ✅ Phase 3 — Linguistic Mastery
+- [x] Porter stemming
+- [x] Edge N-grams
+- [x] Phonetic matching (Soundex/Metaphone)
+- [x] Levenshtein distance
+- [x] BK-tree fuzzy matching (wiring in progress)
+- [x] Synonym expansion
+- [ ] Finite State Transducers — future enhancement
 
-- [x] **25: Write-Ahead Log (WAL) –** Atomic append-only logging for crash recovery.
-- [x] **26: MemTables –** Designing in-memory sorted buffers (Skip-Lists/B-Trees)(implemented using map will update later).
-- [x] **27: SSTables –** Immutable, disk-backed sorted string tables. ( even though done ... needs some improvement such as group commiter)
-- [] **28: The Compactor –** Background Merging (Leveled Compaction) to prevent bloat.
-- [x] **29: Bloom Filters –** Probabilistic data structures for $O(1)$ disk-lookup bypass.
-- [x] **30: Sparse Indexing –** Memory-efficient offset mapping for massive SSTables. (marked lastindex in writer)
+### ✅ Phase 4 — Storage Engine
+- [x] Write-Ahead Log (WAL)
+- [ ] MemTable skip-list (replacing current hashmap)
+- [x] SSTables (group committer improvement pending)
+- [ ] Leveled compaction
+- [x] Bloom filters
+- [x] Sparse index
+
+### 🔧 Phase 5 — CLI + Local Embeddings (current)
+- [ ] `cobra` CLI: `index`, `search`, `serve`, `version`
+- [ ] File crawler with `fsnotify` incremental watching
+- [ ] Ollama embedder integration (`nomic-embed-text`)
+- [ ] OpenAI embedder (optional flag)
+- [ ] Per-file type text extractors (`.md`, `.go`, `.pdf`, `.html`)
+- [ ] `goreleaser` binary releases
+
+### 🔲 Phase 6 — Production Observability
+- [ ] Prometheus metrics exporter (custom Go instrumentation)
+- [ ] OpenTelemetry trace spans across full query path
+- [ ] `make dev-stack` — local Prometheus + Grafana + Tempo
+- [ ] `/metrics` endpoint on `zenith serve`
+
+### 🔲 Phase 7 — Storage Hardening
+- [ ] MemTable skip-list replacement
+- [ ] Leveled compaction background worker
+- [ ] SSTable group committer
+- [ ] WAL recovery benchmarks
+
+---
+
+## Design Decisions
+
+**Why LSM and not B-tree?**
+LSM trees optimize for write throughput — critical for indexing large directories quickly. Reads are fast enough with Bloom filters handling the "does this key exist?" check before any disk access.
+
+**Why BK-tree and not a hashmap for fuzzy search?**
+The hashmap approach is O(n) on every fuzzy query — it scans the entire term dictionary. A BK-tree prunes the search space using the triangle inequality of edit distance, giving O(log n) average case. At 100k indexed terms, the difference is measurable.
+
+**Why Ollama for embeddings?**
+Fully local, zero cost, no data leaves the machine. `nomic-embed-text` runs on CPU, produces 768-dimensional vectors, and is fast enough for interactive search latency. OpenAI is available as an opt-in for higher quality on larger corpora.
+
+**Why not use an existing vector database?**
+Because the point of ZENITH is to understand the storage layer — not consume it. The vector store is intentionally implemented on top of the same LSM engine that handles the inverted index. One storage backend, two index types.
+
+---
+
+## Project Structure
+
+```
+ZENITH/
+├── cmd/zenith/          # CLI entrypoint (cobra)
+├── internal/
+│   ├── analysis/        # tokenizer, stemmer, n-grams, phonetic, fuzzy, BK-tree
+│   ├── crawler/         # fsnotify file watcher + text extractors
+│   ├── embedder/        # Ollama + OpenAI adapters
+│   ├── storage/         # WAL, MemTable, SSTable, Bloom filter, sparse index
+│   ├── index/           # inverted index + vector map
+│   ├── ranker/          # RRF + hybrid scoring
+│   └── metrics/         # Prometheus exporters + OTel spans
+├── pkg/zenith/          # public API types
+├── gen/go/zenithproto/  # generated Protobuf
+├── nerve/               # gRPC server (zenith serve)
+└── deploy/
+    └── docker-compose.yml  # Prometheus + Grafana + Tempo dev stack
+```
+
+---
+
+## Contributing
+
+ZENITH is built in public. Issues and PRs are open.
+
+If you're working on distributed systems, storage engines, or search infrastructure in Go — this is a good place to dig in. Every component has a clear boundary and a reason to exist.
+
+---
+
+## License
+
+MIT

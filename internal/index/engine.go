@@ -33,6 +33,9 @@ type Engine struct {
 	scorer   ranking.Scorer
 	analyzer analysis.Analyzer
 
+	bm25  *ranking.BM25Scorer
+	tfidf *ranking.TFIDFScorer
+
 	// ID mappings
 	idMapping map[uint32]string
 }
@@ -48,6 +51,8 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		scorer:    scr,
 		analyzer:  ana,
 		idMapping: make(map[uint32]string),
+		bm25:      ranking.NewBM25Scorer(ranking.BM25Params{}),
+		tfidf:     ranking.NewTFIDFScorer(),
 	}
 }
 

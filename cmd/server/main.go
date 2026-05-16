@@ -18,7 +18,6 @@ import (
 )
 
 func main() {
-	// Replacing `log` with structured `log/slog`
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
@@ -32,16 +31,15 @@ func main() {
 
 	appConfig := config.DefaultConfig()
 
-	// Dependency Bootstrapping
 	tkz := analysis.NewStandardAnalyzer()
 	rawEmbedder := embedding.NewNeuralEmbedder(appConfig.NerveURL, appConfig.NerveTimeout)
-	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000) // cache up to 10k words
+	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000)
 	if err != nil {
-		slog.Error("failed to create embedding cache", "error", err)
+		slog.Error("Failed to create embedding cache", "error", err)
 		os.Exit(1)
 	}
-	scorer := ranking.NewRRFRanker(appConfig.RRFConstant)
 
+	scorer := ranking.NewRRFRanker(0, 0)
 	engine := index.NewEngine(appConfig, embedder, scorer, tkz)
 
 	if err := engine.Load("zenith.db"); err != nil {
@@ -51,30 +49,27 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	zenithServer := &server.ZenithServer{
+	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
 		Engine: engine,
-	}
-
-	zenithproto.RegisterSearchServiceServer(grpcServer, zenithServer)
+	})
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		slog.Info("ZENITH engine is live", "address", lis.Addr().String())
-
 		if err := grpcServer.Serve(lis); err != nil {
-			slog.Error("failed to serve grpc", "error", err)
+			slog.Error("gRPC serve failed", "error", err)
 		}
 	}()
 
 	<-stop
-	slog.Info("Commencing Graceful Shutdown")
+	slog.Info("Graceful shutdown initiated")
 	grpcServer.GracefulStop()
 
 	if err := engine.Save("zenith.db"); err != nil {
 		slog.Error("Failed to save index", "error", err)
 	} else {
-		slog.Info("Index saved successfully. Goodbye!")
+		slog.Info("Index saved. Goodbye.")
 	}
 }

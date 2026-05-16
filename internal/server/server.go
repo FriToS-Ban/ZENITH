@@ -2,71 +2,78 @@ package server
 
 import (
 	"context"
-
-	"github.com/google/uuid"
+	"fmt"
 	"log/slog"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
 	"github.com/shramanb113/ZENITH/internal/index"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
+// ZenithServer implements zenithproto.SearchServiceServer.
 type ZenithServer struct {
 	zenithproto.UnimplementedSearchServiceServer
 	Engine *index.Engine
 }
 
-func (s *ZenithServer) IndexDocuments(ctx context.Context, req *zenithproto.IndexRequest) (*zenithproto.IndexResponse, error) {
+func (s *ZenithServer) IndexDocuments(
+	ctx context.Context,
+	req *zenithproto.IndexRequest,
+) (*zenithproto.IndexResponse, error) {
 
-	logger := slog.With("doc_id", req.Id)
-	logger.Info("Ingesting new document")
-
-	err := s.Engine.Add(ctx, req.Id, req.Data)
-
-	if err != nil {
-		logger.Error("Failed to index document", "error", err)
+	if req.GetId() == "" {
 		return &zenithproto.IndexResponse{
 			Status:  false,
-			Message: "Failed indexing document",
-		}, err
+			Message: "document id must not be empty",
+		}, status.Error(codes.InvalidArgument, "document id must not be empty")
+	}
+	if req.GetData() == "" {
+		return &zenithproto.IndexResponse{
+			Status:  false,
+			Message: "document data must not be empty",
+		}, status.Error(codes.InvalidArgument, "document data must not be empty")
 	}
 
+	if err := s.Engine.Add(ctx, req.GetId(), req.GetData()); err != nil {
+		slog.Error("Failed to index document", "id", req.GetId(), "error", err)
+		msg := fmt.Sprintf("indexing failed: %v", err)
+		return &zenithproto.IndexResponse{
+			Status:  false,
+			Message: msg,
+		}, status.Error(codes.Internal, msg)
+	}
+
+	slog.Info("Document indexed", "id", req.GetId())
 	return &zenithproto.IndexResponse{
 		Status:  true,
-		Message: "Document Indexed successfully",
+		Message: fmt.Sprintf("document %s indexed successfully", req.GetId()),
 	}, nil
 }
 
-func (s *ZenithServer) Search(ctx context.Context, req *zenithproto.SearchRequest) (*zenithproto.SearchResponse, error) {
+func (s *ZenithServer) Search(
+	ctx context.Context,
+	req *zenithproto.SearchRequest,
+) (*zenithproto.SearchResponse, error) {
 
-	// AP-3 and AP-5 Fix: Logging search with UUID string
-	requestID := uuid.NewString()
-	searchCtx := context.WithValue(ctx, "request_id", requestID)
-
-	logger := slog.With(
-		slog.String("request_id", requestID),
-		slog.String("query", req.Query),
-	)
-
-	logger.Info("Search started")
-
-	results, err := s.Engine.Search(searchCtx, req.Query)
-	if err != nil {
-		logger.Error("Search failed", "error", err)
-		return nil, err
+	if req.GetQuery() == "" {
+		return nil, status.Error(codes.InvalidArgument, "query must not be empty")
 	}
 
-	logger.Info("Search completed", slog.Int("results_count", len(results)))
+	results, err := s.Engine.Search(ctx, req.GetQuery())
+	if err != nil {
+		slog.Error("Search failed", "query", req.GetQuery(), "error", err)
+		return nil, status.Errorf(codes.Internal, "search failed: %v", err)
+	}
 
-	var protoResults []*zenithproto.SearchResult
-
-	for _, res := range results {
+	protoResults := make([]*zenithproto.SearchResult, 0, len(results))
+	for _, r := range results {
 		protoResults = append(protoResults, &zenithproto.SearchResult{
-			Id:    res.ID,
-			Score: res.Score,
+			Id:    r.ID,
+			Score: r.Score,
 		})
 	}
 
-	return &zenithproto.SearchResponse{
-		Results: protoResults,
-	}, nil
+	slog.Info("Search complete", "query", req.GetQuery(), "hits", len(protoResults))
+	return &zenithproto.SearchResponse{Results: protoResults}, nil
 }

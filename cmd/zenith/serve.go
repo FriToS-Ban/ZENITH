@@ -22,10 +22,8 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the gRPC search server",
 	Long: `Starts the ZENITH gRPC server and exposes the full search and indexing
-API for remote clients (use cmd/client or any gRPC client).
-
-The server loads the existing index from zenith.db on startup and saves it
-on graceful shutdown (SIGINT / SIGTERM).`,
+API for remote clients. Loads the existing index from zenith.db on startup
+and saves it on graceful shutdown (SIGINT / SIGTERM).`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		setupLogger()
@@ -34,6 +32,8 @@ on graceful shutdown (SIGINT / SIGTERM).`,
 		if err != nil {
 			return fmt.Errorf("listen :%s: %w", serveFlags.port, err)
 		}
+
+		printHeader("serve", ":"+serveFlags.port)
 
 		engine, teardown, err := buildEngine(true)
 		if err != nil {
@@ -53,8 +53,11 @@ on graceful shutdown (SIGINT / SIGTERM).`,
 			}
 		}()
 
+		fmt.Printf("  %s  gRPC listening on %s\n", green("✓"), bold(":"+serveFlags.port))
+		fmt.Printf("  %s  Press Ctrl-C to stop\n\n", dim("·"))
+
 		<-stop
-		slog.Info("Graceful shutdown")
+		fmt.Printf("\n  %s  Shutting down...\n", dim("·"))
 		grpcServer.GracefulStop()
 		teardown()
 		return nil

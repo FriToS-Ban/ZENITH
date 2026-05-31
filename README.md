@@ -8,11 +8,61 @@ The storage layer is built from scratch: a full LSM-tree pipeline (WAL → MemTa
 
 ---
 
+## Install
+
+### Pre-built binary (recommended)
+
+Download the latest release from the [Releases page](https://github.com/shramanb113/ZENITH/releases) and add to your PATH.
+
+```bash
+# macOS / Linux — amd64
+curl -L https://github.com/shramanb113/ZENITH/releases/latest/download/zenith_linux_amd64.tar.gz | tar xz
+sudo mv zenith /usr/local/bin/
+
+# macOS ARM (Apple Silicon)
+curl -L https://github.com/shramanb113/ZENITH/releases/latest/download/zenith_darwin_arm64.tar.gz | tar xz
+sudo mv zenith /usr/local/bin/
+
+# Windows — download zenith_windows_amd64.zip from the Releases page
+# Extract zenith.exe and add its folder to your PATH
+```
+
+### Go install
+
+```bash
+go install github.com/shramanb113/ZENITH/cmd/zenith@latest
+```
+
+---
+
+## Quick Start
+
+```bash
+# Index a directory
+zenith index ~/Documents
+
+# Search — hybrid lexical + fuzzy + semantic
+zenith search "kubernetes memory debugging"
+
+# More results
+zenith search -n 20 "kubernetes memory debugging"
+
+# Index and watch for live file changes
+zenith watch --index-first ~/Documents
+
+# Start gRPC server for remote access
+zenith serve --port 8080
+```
+
+The first time you run any command, ZENITH auto-starts the nerve embedding service in the background (see below). No configuration needed.
+
+---
+
 ## Feature Status
 
 | Feature | Status | Notes |
 |---|---|---|
-| CLI (`index`, `search`, `watch`, `serve`, `version`) | Active | Full cobra CLI |
+| CLI (`index`, `search`, `watch`, `serve`, `version`) | Active | |
 | LSM storage (WAL, MemTable, SSTable, Compaction) | Active | Ground-up implementation |
 | Bloom filter + sparse index | Active | Per-SSTable |
 | BK-tree fuzzy matching | Active | O(log n) Levenshtein |
@@ -22,97 +72,70 @@ The storage layer is built from scratch: a full LSM-tree pipeline (WAL → MemTa
 | Synonym expansion | Active | |
 | FST term dictionary | Active | Rebuilt after every flush |
 | RRF hybrid ranking | Active | |
-| Deterministic embedder | Active | Default — zero dependencies |
-| Ollama embedder | Active | Requires local Ollama install |
-| Nerve Python sidecar | Active | Requires running the sidecar |
+| Nerve auto-start (embedded in binary) | Active | Requires Python 3 |
+| Deterministic embedder | Active | Fallback — zero dependencies |
+| Ollama embedder | Active | Requires local Ollama |
 | gRPC server (`zenith serve`) | Active | Port 8080 default |
 | fsnotify incremental watching | Active | |
 | `.txt` `.md` `.go` `.html` extractors | Active | |
-| PDF extraction | Not implemented | Returns unsupported error |
+| PDF extraction | Not implemented | Planned |
 | OpenAI embedder | Not implemented | Planned |
 | Prometheus metrics | Not implemented | Phase 6 |
 | OpenTelemetry traces | Not implemented | Phase 6 |
-| goreleaser binary releases | Not implemented | Phase 5 pending |
 
 ---
 
-## Quick Start
+## How Nerve Works
+
+ZENITH ships with the nerve embedding service **baked into the binary**. On every invocation it checks if nerve is already running at `127.0.0.1:8000`. If not, it:
+
+1. Extracts `main.py` to `~/.zenith/nerve/`
+2. Creates an isolated virtualenv at `~/.zenith/nerve/venv/`
+3. Installs `fastapi`, `uvicorn`, and `sentence-transformers` (once, ~90 MB)
+4. Starts uvicorn as a detached background process on port 8000
+5. Waits up to 20 s for the health check to pass
+
+**First run** (deps not installed) takes 1–3 minutes and requires Python 3 and internet access. Every subsequent run reuses the running process and starts in under 2 s.
+
+If Python 3 is not found, ZENITH tries Ollama next. If that is also unavailable, it falls back to deterministic embeddings. None of these fallbacks crash — they just reduce semantic search quality.
+
+The nerve process survives the parent zenith process. Kill it manually if needed:
 
 ```bash
-# Install from source
-go install github.com/shramanb113/ZENITH/cmd/zenith@latest
+# macOS / Linux
+pkill -f "uvicorn main:app"
 
-# Index a directory
-zenith index ~/Documents
-
-# Search (hybrid: lexical + fuzzy + semantic)
-zenith search "kubernetes memory debugging"
-
-# Search with more results
-zenith search -n 20 "kubernetes memory debugging"
-
-# Index and watch for live updates
-zenith watch --index-first ~/Documents
-
-# Start gRPC server for remote access
-zenith serve --port 8080
+# Windows
+taskkill /f /im uvicorn.exe
 ```
 
-By default ZENITH uses the **deterministic embedder** — no external services needed. For real semantic search, pick an embedder backend (see below).
+> **No Python?** Install [Ollama](https://ollama.com) and run `ollama pull nomic-embed-text`. Use `--embedder ollama` to always prefer it.
 
 ---
 
 ## Embedder Backends
 
-ZENITH supports three embedding backends selectable via `--embedder`. All three work with a pre-built binary — no Python or sidecar needs to be bundled.
+Select with `--embedder`. The default (`auto`) runs the cascade automatically.
 
-### Deterministic (default)
-
-Hash-based embeddings. No setup, no external process. Lexical and fuzzy search work at full quality; semantic ranking is approximate.
-
-```bash
-zenith index ~/Documents
-zenith search "query"
+```
+auto          nerve → Ollama → deterministic  (default)
+nerve         nerve sidecar only (auto-managed at ~/.zenith/nerve/)
+ollama        local Ollama (needs: ollama serve + ollama pull nomic-embed-text)
+deterministic hash-based, zero dependencies
 ```
 
-### Ollama (recommended for semantic search)
-
-Runs fully offline. Many users already have Ollama installed. ZENITH uses `nomic-embed-text` (768-dimensional, CPU-friendly).
-
 ```bash
-# One-time setup
-ollama pull nomic-embed-text
-# ollama serve runs automatically on most installs
-
-# Use Ollama for indexing and search
+# Always use Ollama
 zenith index --embedder ollama ~/Documents
 zenith search --embedder ollama "query"
 
-# Custom Ollama URL or model
-zenith index --embedder ollama --ollama-url http://localhost:11434 --ollama-model nomic-embed-text ~/Documents
+# Always use deterministic (fully offline, no Python needed)
+zenith index --embedder deterministic ~/Documents
+zenith search --embedder deterministic "query"
+
+# Nerve at a custom URL (e.g. on another machine)
+zenith search --embedder nerve --nerve-url http://192.168.1.10:8000 "query"
 ```
-
-If Ollama is offline when you run a query, ZENITH degrades gracefully to lexical-only search — it does not crash.
-
-### Nerve Python Sidecar
-
-A FastAPI service bundled in the repo that serves `all-MiniLM-L6-v2` (384-dimensional) embeddings. Use this if you prefer not to install Ollama.
-
-```bash
-# One-time setup (from the ZENITH repo root)
-cd nerve
-pip install -e .          # installs fastapi, uvicorn, sentence-transformers
-uvicorn main:app --host 0.0.0.0 --port 8000
-
-# In another terminal
-zenith index --embedder nerve ~/Documents
-zenith search --embedder nerve "query"
-
-# Custom nerve URL
-zenith search --embedder nerve --nerve-url http://localhost:8000 "query"
-```
-
-The nerve sidecar is not bundled in binary releases — it lives in the repo and must be started manually. For most users, Ollama is simpler.
 
 ---
 
@@ -122,45 +145,45 @@ The nerve sidecar is not bundled in binary releases — it lives in the repo and
 zenith index <path>
       │
       ▼
-┌─────────────┐     ┌──────────────────────┐     ┌────────────────────────────┐
-│   Crawler   │────▶│       Analyzer        │────▶│         Embedder           │
-│  (fsnotify) │     │                      │     │                            │
-│  recursive  │     │  regex tokenise      │     │  deterministic (default)   │
-│  dir walk   │     │  camelCase-aware     │     │  ── or ──                  │
-│  + live     │     │  lowercase           │     │  ollama nomic-embed-text   │
-│  watching   │     │  stop-word filter    │     │  ── or ──                  │
-│             │     │  Porter2 stem        │     │  nerve all-MiniLM-L6-v2   │
-│             │     │  FST prefix-resolve  │     │                            │
-│             │     │  synonym expand      │     │  → []float32               │
-└─────────────┘     └──────────────────────┘     └────────────┬───────────────┘
-                                                              │
-                             ┌────────────────────────────────┘
-                             ▼
-                     ┌───────────────┐
-                     │  LSM Storage  │
-                     │               │
-                     │  WAL          │  crash-safe append log
-                     │  MemTable     │  skip-list, O(log n)
-                     │  SSTable      │  immutable, block-structured
-                     │  Bloom filter │  O(1) miss bypass
-                     │  Sparse index │  memory-efficient offsets
-                     │  Compaction   │  leveled, background worker
-                     └───────┬───────┘
-                             │
-zenith search <query>        │
-      │                      ▼
-      │              ┌───────────────┐
-      │              │  Query Engine │
-      ├─────────────▶│               │
-      │  lexical     │  BM25 scoring │
-      │  fuzzy       │  TF-IDF       │
-      │  semantic    │  edge n-grams │
-      │              │  phonetic     │
-      │              │  BK-tree      │  O(log n) fuzzy
-      │              │  vector cosine│  dot product
-      │              │               │
-      │              │  RRF fusion   │  merges all signals
-      │              └───────────────┘
+┌─────────────┐     ┌──────────────────────┐     ┌─────────────────────────────┐
+│   Crawler   │────▶│       Analyzer        │────▶│         Embedder            │
+│  (fsnotify) │     │                      │     │                             │
+│  recursive  │     │  regex tokenise      │     │  auto cascade (default):    │
+│  dir walk   │     │  camelCase-aware     │     │  1. nerve  all-MiniLM-L6-v2 │
+│  + live     │     │  lowercase           │     │  2. ollama nomic-embed-text  │
+│  watching   │     │  stop-word filter    │     │  3. deterministic (fallback) │
+│             │     │  Porter2 stem        │     │                             │
+│             │     │  FST prefix-resolve  │     │  → []float32                │
+│             │     │  synonym expand      │     │                             │
+└─────────────┘     └──────────────────────┘     └──────────────┬──────────────┘
+                                                                │
+                               ┌────────────────────────────────┘
+                               ▼
+                       ┌───────────────┐
+                       │  LSM Storage  │
+                       │               │
+                       │  WAL          │  crash-safe append log
+                       │  MemTable     │  skip-list, O(log n)
+                       │  SSTable      │  immutable, block-structured
+                       │  Bloom filter │  O(1) miss bypass
+                       │  Sparse index │  memory-efficient offsets
+                       │  Compaction   │  leveled, background worker
+                       └───────┬───────┘
+                               │
+zenith search <query>          │
+      │                        ▼
+      │                ┌───────────────┐
+      │                │  Query Engine │
+      ├───────────────▶│               │
+      │  lexical       │  BM25 scoring │
+      │  fuzzy         │  TF-IDF       │
+      │  semantic      │  edge n-grams │
+      │                │  phonetic     │
+      │                │  BK-tree      │  O(log n) fuzzy
+      │                │  vector cosine│  dot product
+      │                │               │
+      │                │  RRF fusion   │  merges all signals
+      │                └───────────────┘
       │
       └──▶ zenith serve ──▶ gRPC server (port :8080)
 ```
@@ -182,8 +205,6 @@ ZENITH's index is backed by a full LSM-tree — the same architecture used by Ro
 | Sparse Index | Memory-efficient offset map per SSTable | Active |
 | FST Dictionary | Rebuilt after every flush, prefix-resolve | Active |
 
-The WAL guarantees no indexed document is lost on crash. Bloom filters mean queries never hit disk for keys that don't exist. Compaction keeps read amplification bounded as the index grows.
-
 ---
 
 ## Search Pipeline
@@ -203,9 +224,8 @@ The WAL guarantees no indexed document is lost on crash. Bloom filters mean quer
 
 ### Semantic Layer
 
-- Embedding via Ollama, Nerve sidecar, or deterministic fallback
-- Vector cosine similarity (dot product with cached magnitudes)
-- Stored as float16 to halve memory; magnitudes cached separately
+- Embedding via nerve (`all-MiniLM-L6-v2`, 384-dim), Ollama (`nomic-embed-text`, 768-dim), or deterministic fallback
+- Vector cosine similarity (dot product with cached magnitudes, stored as float16)
 - Embedding failures are non-fatal — engine degrades to lexical-only
 
 ### Ranking
@@ -223,7 +243,7 @@ The WAL guarantees no indexed document is lost on crash. Bloom filters mean quer
 | `.txt` `.md` `.log` `.csv` `.json` `.yaml` | Raw UTF-8 text | Active |
 | `.go` | AST — identifiers, comments, package name | Active |
 | `.py` `.ts` `.js` `.jsx` `.tsx` `.rs` `.java` `.c` `.cpp` | Raw source | Active |
-| `.html` `.htm` | Tag-stripped visible text (skips `<script>`, `<style>`) | Active |
+| `.html` `.htm` | Tag-stripped visible text | Active |
 | `.pdf` | Not implemented | Planned |
 
 ZENITH watches indexed directories with `fsnotify`. Changed files are re-indexed on write events without a full re-crawl.
@@ -256,21 +276,21 @@ zenith serve                Start the gRPC server
 zenith version              Print version
 
 Common flags (all commands):
-  --db           string   Index database path (default: zenith.db)
-  --fst          string   On-disk FST path (default: ./data/index.fst)
-  --embedder     string   ollama | nerve | deterministic (default: deterministic)
-  --ollama-url   string   Ollama server URL (default: http://localhost:11434)
-  --ollama-model string   Ollama model name (default: nomic-embed-text)
-  --nerve-url    string   Nerve sidecar URL (default: http://localhost:8000)
+  --db           string   Index database path             (default: zenith.db)
+  --fst          string   On-disk FST path                (default: ./data/index.fst)
+  --embedder     string   auto|nerve|ollama|deterministic (default: auto)
+  --ollama-url   string   Ollama server URL               (default: http://localhost:11434)
+  --ollama-model string   Ollama model name               (default: nomic-embed-text)
+  --nerve-url    string   Nerve sidecar URL               (default: http://127.0.0.1:8000)
 
 search flags:
-  -n, --max int   Maximum results to display (default: 10)
+  -n, --max int   Maximum results to display              (default: 10)
 
 watch flags:
   --index-first   Bulk-index before starting the watcher
 
 serve flags:
-  -p, --port string   gRPC listen port (default: 8080)
+  -p, --port string   gRPC listen port                    (default: 8080)
 ```
 
 ---
@@ -319,13 +339,14 @@ serve flags:
 
 - [x] `cobra` CLI: `index`, `search`, `watch`, `serve`, `version`
 - [x] File crawler with `fsnotify` incremental watching
+- [x] Nerve sidecar embedded in binary, auto-started on first run
 - [x] Ollama embedder (`nomic-embed-text`, fully offline)
-- [x] Nerve Python sidecar embedder (`all-MiniLM-L6-v2`)
-- [x] Deterministic hash embedder (zero-dependency default)
+- [x] Deterministic hash embedder (zero-dependency fallback)
+- [x] Auto cascade: nerve → Ollama → deterministic
 - [x] Per-file type text extractors (`.md`, `.go`, `.html`, raw source)
+- [x] goreleaser binary releases (linux/darwin amd64+arm64, windows amd64)
 - [ ] OpenAI embedder (optional flag)
 - [ ] PDF text extraction
-- [ ] goreleaser binary releases
 
 ### Phase 6 — Production Observability (planned)
 
@@ -344,12 +365,13 @@ All tunable parameters live in `internal/config/config.go` (`DefaultConfig()`).
 |---|---|---|
 | `FuzzyMaxDist` | `2` | BK-tree edit distance threshold |
 | `RRFConstant` | `60.0` | RRF k value |
-| `PhoneticWeight` | — | Phonetic signal weight in fusion |
-| `VectorWeight` | — | Vector signal weight in fusion |
-| `NeuralWeight` | — | Neural signal weight in fusion |
-| `NerveURL` | `http://localhost:8000` | Nerve sidecar URL |
-| `MemTableMaxSize` | `64MB` | SSTable flush threshold |
-| `CommitWindow` | `4ms` | Group-committer batch window |
+| `PhoneticWeight` | `0.3` | Phonetic signal weight in fusion |
+| `VectorWeight` | `0.7` | Vector signal weight in fusion |
+| `NeuralWeight` | `1.0` | Neural signal weight in fusion |
+| `NerveURL` | `http://127.0.0.1:8000` | Nerve sidecar URL |
+| `NerveTimeout` | `5s` | Per-request timeout to nerve |
+| `MemTableMaxSize` | `64 MB` | SSTable flush threshold |
+| `CommitWindow` | `4 ms` | Group-committer batch window |
 
 ---
 
@@ -361,11 +383,14 @@ LSM trees optimize for write throughput — critical for indexing large director
 **Why BK-tree and not a hashmap for fuzzy search?**
 The hashmap approach is O(n) on every fuzzy query — it scans the entire term dictionary. A BK-tree prunes the search space using the triangle inequality of edit distance, giving O(log n) average case. At 100k indexed terms the difference is measurable.
 
-**Why three embedder backends?**
-A pre-built binary cannot bundle a Python runtime. The deterministic embedder means the binary works with zero setup. Ollama is the recommended semantic path — it is local, free, and a large fraction of developers already have it. The Nerve sidecar exists for users who want a lightweight Python option without Ollama's full install.
+**Why embed nerve in the binary?**
+A pre-built binary cannot run Python. Embedding `main.py` and bootstrapping a virtualenv on first run means the binary is self-contained: users with Python 3 get full semantic search automatically, and users without fall back gracefully. No separate installer, no PATH configuration for a sidecar, no docs page that says "also run this other thing."
+
+**Why Ollama as the second choice?**
+A large fraction of developers already have Ollama installed. It runs fully offline, has no API key requirement, and `nomic-embed-text` is CPU-friendly. When nerve is unavailable, Ollama is often already there.
 
 **Why not use an existing vector database?**
-Because the point of ZENITH is to understand the storage layer — not consume it. The vector store is intentionally implemented on top of the same LSM engine that handles the inverted index. One storage backend, two index types.
+Because the point of ZENITH is to understand the storage layer — not consume it. The vector store is intentionally built on top of the same LSM engine that handles the inverted index. One storage backend, two index types.
 
 ---
 
@@ -374,19 +399,22 @@ Because the point of ZENITH is to understand the storage layer — not consume i
 ```
 ZENITH/
 ├── cmd/
-│   ├── zenith/        # CLI entrypoint (cobra) — index, search, watch, serve
-│   └── server/        # standalone gRPC server (without CLI wrapper)
+│   ├── zenith/               # CLI entrypoint (cobra) — index, search, watch, serve
+│   └── server/               # standalone gRPC server (without CLI)
 ├── internal/
-│   ├── analysis/      # tokenizer, stemmer, n-grams, phonetic, BK-tree, FST
-│   ├── crawler/       # fsnotify file watcher + text extractors
-│   ├── embedding/     # Ollama, Nerve, deterministic adapters + LRU cache
-│   ├── storage/       # WAL, MemTable, SSTable, Bloom filter, compaction
-│   ├── index/         # inverted index + vector store + search orchestrator
-│   ├── ranking/       # RRF + BM25 tiebreak + TF-IDF
-│   └── config/        # all tunable parameters
-├── pkg/zenith/        # public API types
-├── gen/go/zenithproto/ # generated Protobuf
-└── nerve/             # Python embedding sidecar (FastAPI + sentence-transformers)
+│   ├── analysis/             # tokenizer, stemmer, n-grams, phonetic, BK-tree, FST
+│   ├── crawler/              # fsnotify file watcher + text extractors
+│   ├── embedding/            # Ollama, nerve, deterministic adapters + LRU cache
+│   ├── nervemanager/         # nerve lifecycle: embed, extract, venv, auto-start
+│   │   └── assets/           # main.py and requirements.txt (baked into binary)
+│   ├── storage/              # WAL, MemTable, SSTable, Bloom filter, compaction
+│   ├── index/                # inverted index + vector store + search orchestrator
+│   ├── ranking/              # RRF + BM25 tiebreak + TF-IDF
+│   └── config/               # all tunable parameters
+├── pkg/zenith/               # public API types
+├── gen/go/zenithproto/       # generated Protobuf
+├── nerve/                    # Python embedding sidecar (source, for development)
+└── .goreleaser.yml           # multi-platform binary release config
 ```
 
 ---
@@ -395,7 +423,7 @@ ZENITH/
 
 ZENITH is built in public. Issues and PRs are open.
 
-Every component has a clear boundary and a reason to exist. If you're working on distributed systems, storage engines, or search infrastructure in Go this is a good place to dig in.
+Every component has a clear boundary and a reason to exist. If you are working on storage engines, search infrastructure, or NLP pipelines in Go this is a good place to dig in.
 
 ---
 

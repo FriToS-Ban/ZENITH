@@ -61,6 +61,9 @@ func main() {
 	scorer := ranking.NewRRFRanker(0, 0)
 	engine := index.NewEngine(appConfig, embedder, scorer, tkz)
 
+	// Keep the index-layer FST on disk (memory-mapped, not held in RAM).
+	engine.SetFSTPath("./data/index.fst")
+
 	// Wire the storage engine as the index engine's term sink.
 	// Every time index.Engine rebuilds its FST (after Add() or Load()),
 	// the full vocabulary is forwarded to storageEng.AddTerms(), which

@@ -1,131 +1,166 @@
-package cmd
+package crawler
 
 import (
-	"fmt"
+	"context"
+	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/spf13/cobra"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "zenith",
-	Short: "ZENITH: Local-first semantic & lexical search engine",
-	Long: `ZENITH is a high-performance local search engine built from scratch in Go.
-It features a hybrid scoring engine (BM25 + Cosine Similarity fused via RRF) 
-backed by a native LSM-tree storage engine (WAL, MemTable, SSTables).`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(`
- ███████╗███████╗███╗   ██╗██╗████████╗██╗  ██╗
- ╚══███╔╝██╔════╝████╗  ██║██║╚══██╔══╝██║  ██║
-   ███╔╝ █████╗  ██╔██╗ ██║██║   ██║   ███████║
-  ███╔╝  ██╔══╝  ██║╚██╗██║██║   ██║   ██╔══██║
- ███████╗███████╗██║ ╚████║██║   ██║   ██║  ██║
- ╚══════╝╚══════╝╚═╝  ╚═══╝╚═╝   ╚═╝   ╚═╝  ╚═╝
- 
-A local-first hybrid search engine written from scratch in Go.
-USAGE:
-  zenith [command] [arguments]
-
-CORE COMMANDS:
-  watch <dir>   Watch a local directory for real-time changes & index files
-  index <dir>   Perform a bulk, one-time scan and index of a directory
-  search <q>    Query the engine (Supports natural language & --fuzzy flags)
-  serve         Start the production gRPC server & Prometheus metrics endpoint
-
-ENGINE ARCHITECTURE:
-  [Crawler] ──> [Analyzer] ──> [Embedder] ──> [LSM Storage Engine]
-  (fsnotify)    (Tokenizer)    (Local Ollama)  (WAL -> MemTable -> SSTable)
-
-HYBRID RANKING PIPELINE:
-  1. Lexical:  Inverted Index with BM25 / TF-IDF scoring & Porter Stemming
-  2. Fuzzy:    BK-Tree over Levenshtein distance for O(log n) typo tolerance
-  3. Semantic: Local Vector embeddings (nomic-embed-text) via Ollama
-  4. Fusion:   Reciprocal Rank Fusion (RRF) score normalization
-
-Use "zenith [command] --help" for more information about a specific command.`)
-	},
+// Indexer is the interface the Watcher calls when a file needs to be indexed
+// or removed. index.Engine satisfies this interface.
+type Indexer interface {
+	Add(ctx context.Context, id string, text string) error
 }
 
-var watchCmd = &cobra.Command{
-	Use:   "watch [directory_path]",
-	Short: "Watch a directory for real-time file changes",
-	Args:  cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) == 0 {
-			cmd.Help()
-			return
-		}
+// Watcher walks a directory tree, indexes every supported file, then keeps
+// the index current by watching for fsnotify events (create, write, rename,
+// remove). All file reads go through ExtractText so every format gets proper
+// text extraction.
+type Watcher struct {
+	indexer  Indexer
+	watcher  *fsnotify.Watcher
+	mu       sync.Mutex
+	watching map[string]struct{}
+}
 
-		targetDir := args[0]
+// NewWatcher creates a Watcher backed by indexer.
+func NewWatcher(indexer Indexer) (*Watcher, error) {
+	fw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	return &Watcher{
+		indexer:  indexer,
+		watcher:  fw,
+		watching: make(map[string]struct{}),
+	}, nil
+}
 
-		info, err := os.Stat(targetDir)
+// IndexDir performs a one-time, recursive walk of dir, indexing every
+// supported file. It does NOT start watching — use Watch for live updates.
+func (w *Watcher) IndexDir(ctx context.Context, dir string) error {
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error accessing path: %v\n", err)
-			os.Exit(1)
+			slog.Warn("crawler: walk error", "path", path, "error", err)
+			return nil
 		}
-		if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "Path is a file, not a directory: %s\n", targetDir)
-			os.Exit(1)
+		if d.IsDir() || !SupportedExt(filepath.Ext(path)) {
+			return nil
 		}
+		return w.indexFile(ctx, path)
+	})
+}
 
-		watcher, err := fsnotify.NewWatcher()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to initialize fsnotify: %v\n", err)
-			os.Exit(1)
+// Watch starts watching dir (and all subdirectories discovered during the
+// initial walk) for file-system changes. It blocks until ctx is cancelled.
+// Call IndexDir first if you want an initial bulk index, or call Watch
+// directly if you only want incremental updates.
+func (w *Watcher) Watch(ctx context.Context, dir string) error {
+	// Register the root dir and every subdirectory.
+	if err := w.addDir(dir); err != nil {
+		return err
+	}
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
 		}
-		defer watcher.Close()
+		return w.addDir(path)
+	}); err != nil {
+		return err
+	}
 
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	slog.Info("crawler: watching directory", "dir", dir)
 
-		go func() {
-			for {
-				select {
-				case event, ok := <-watcher.Events:
-					if !ok {
-						return
-					}
-					if event.Has(fsnotify.Write) {
-						fmt.Printf("[WRITE] File modified: %s\n", event.Name)
-					} else if event.Has(fsnotify.Create) {
-						fmt.Printf("[CREATE] File created: %s\n", event.Name)
-					} else if event.Has(fsnotify.Remove) {
-						fmt.Printf("[REMOVE] File deleted: %s\n", event.Name)
-					} else if event.Has(fsnotify.Rename) {
-						fmt.Printf("[RENAME] File moved/renamed: %s\n", event.Name)
-					}
-				case err, ok := <-watcher.Errors:
-					if !ok {
-						return
-					}
-					fmt.Fprintf(os.Stderr, "Watcher error: %v\n", err)
-				}
+	for {
+		select {
+		case <-ctx.Done():
+			return w.watcher.Close()
+
+		case event, ok := <-w.watcher.Events:
+			if !ok {
+				return nil
 			}
-		}()
+			w.handleEvent(ctx, event)
 
-		err = watcher.Add(targetDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to add path to watcher: %v\n", err)
-			os.Exit(1)
+		case err, ok := <-w.watcher.Errors:
+			if !ok {
+				return nil
+			}
+			slog.Warn("crawler: fsnotify error", "error", err)
 		}
-
-		fmt.Printf("⚡ ZENITH: Active watcher streaming from -> %s\n", targetDir)
-
-		<-sigChan
-		fmt.Println("\n🛑 Gracefully shutting down ZENITH Watcher registry...")
-	},
-}
-
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Oops. An error while executing ZENITH '%s'\n", err)
-		os.Exit(1)
 	}
 }
 
-func init() {
-	rootCmd.AddCommand(watchCmd)
+// Close releases the underlying fsnotify watcher.
+func (w *Watcher) Close() error {
+	return w.watcher.Close()
+}
+
+// ─── Internal ──────────────────────────────────────────────────────────────────
+
+func (w *Watcher) addDir(dir string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.watching[dir]; ok {
+		return nil
+	}
+	if err := w.watcher.Add(dir); err != nil {
+		return err
+	}
+	w.watching[dir] = struct{}{}
+	return nil
+}
+
+func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event) {
+	path := event.Name
+	ext := strings.ToLower(filepath.Ext(path))
+
+	switch {
+	case event.Has(fsnotify.Create):
+		info, err := os.Stat(path)
+		if err != nil {
+			return
+		}
+		if info.IsDir() {
+			_ = w.addDir(path)
+			return
+		}
+		if !SupportedExt(ext) {
+			return
+		}
+		slog.Info("crawler: indexing new file", "path", path)
+		if err := w.indexFile(ctx, path); err != nil {
+			slog.Warn("crawler: index failed", "path", path, "error", err)
+		}
+
+	case event.Has(fsnotify.Write):
+		if !SupportedExt(ext) {
+			return
+		}
+		slog.Info("crawler: re-indexing modified file", "path", path)
+		if err := w.indexFile(ctx, path); err != nil {
+			slog.Warn("crawler: re-index failed", "path", path, "error", err)
+		}
+
+	case event.Has(fsnotify.Remove), event.Has(fsnotify.Rename):
+		slog.Info("crawler: file removed", "path", path)
+		// index.Engine.Add is idempotent — no remove API yet; log only.
+	}
+}
+
+func (w *Watcher) indexFile(ctx context.Context, path string) error {
+	text, err := ExtractText(path)
+	if err != nil {
+		return err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	return w.indexer.Add(ctx, absPath, text)
 }

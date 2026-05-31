@@ -3,7 +3,9 @@ package analysis
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sort"
+	"sync"
 
 	"github.com/blevesearch/vellum"
 )
@@ -11,96 +13,130 @@ import (
 // FSTDictionary is a read-optimised, memory-efficient term dictionary built
 // on top of blevesearch/vellum (finite state transducer).
 //
-// # What it does
+// # Two operating modes
 //
-//   - O(1) exact term lookup via FST traversal
-//   - O(prefix_length) prefix expansion — "kubern" → ["kubernetes", ...]
-//   - Memory: ~2–4 bytes per term vs ~50–100 bytes per entry in a Go map
+//  1. In-memory (Build): for tests and one-off use. The FST lives in a
+//     bytes.Buffer and is held entirely in RAM.
 //
-// # What it does NOT do
+//  2. On-disk (BuildToFile + OpenFromFile): for production. The FST is written
+//     atomically to a file and reopened via memory-mapping. The OS pages in
+//     only the portions accessed — 2–4 bytes/term on disk vs 50–100 bytes/term
+//     in a Go map. Startup is instant (open mmap, no rebuild).
 //
-//   - Fuzzy/edit-distance lookup — that stays in BKTree
-//   - Phonetic lookup — that stays in PhoneticIndex
-//   - Real-time incremental inserts — vellum requires lexicographic insert
-//     order, so the FST is rebuilt in bulk from a sorted term list
+// # Memory safety
 //
-// # Lifecycle
-//
-//	dict := NewFSTDictionary()
-//	dict.Build(terms)          // call after indexing a batch, or on Save
-//	dict.Contains("kubernetes")
-//	dict.PrefixSearch("kubern", 10)
-//
-// During active indexing, use the Engine's globalSeen map as the live
-// dictionary. Call Build() when saving the index so the FST is always
-// consistent with the persisted state.
+// Contains, PrefixSearch, and Size hold a read lock; Build, BuildToFile,
+// OpenFromFile, and Close hold a write lock. Concurrent queries are safe while
+// a rebuild is in flight.
 type FSTDictionary struct {
+	mu    sync.RWMutex
 	fst   *vellum.FST
 	built bool
 }
 
 // NewFSTDictionary creates an empty FSTDictionary.
-// Call Build() before using Contains or PrefixSearch.
+// Call Build or OpenFromFile before using Contains or PrefixSearch.
 func NewFSTDictionary() *FSTDictionary {
 	return &FSTDictionary{}
 }
 
-// Build constructs the FST from terms.
-// terms does not need to be sorted — Build sorts internally.
-// Existing FST is replaced atomically.
-// Safe to call multiple times (rebuild after re-indexing).
+// ─── In-memory build ──────────────────────────────────────────────────────────
+
+// Build constructs the FST entirely in RAM from terms.
+// terms need not be sorted — Build sorts and deduplicates internally.
+// Prefer BuildToFile for production; use Build in tests.
 func (d *FSTDictionary) Build(terms []string) error {
-	if len(terms) == 0 {
-		d.fst = nil
-		d.built = false
-		return nil
-	}
-
-	// vellum REQUIRES lexicographic order — sort a copy.
-	sorted := make([]string, len(terms))
-	copy(sorted, terms)
-	sort.Strings(sorted)
-
-	// Deduplicate (sort makes this O(n)).
-	deduped := sorted[:0]
-	for i, t := range sorted {
-		if i == 0 || t != sorted[i-1] {
-			deduped = append(deduped, t)
-		}
-	}
+	deduped := sortAndDedup(terms)
 
 	var buf bytes.Buffer
-	builder, err := vellum.New(&buf, nil)
+	fst, err := buildFSTInto(&buf, deduped)
 	if err != nil {
-		return fmt.Errorf("fst: failed to create builder: %w", err)
+		return err
 	}
 
-	// Value encodes term position in sorted order (1-indexed).
-	// This lets us use the FST as an ordered dictionary — value 0
-	// is reserved as "not found" in vellum's Get API.
-	for i, term := range deduped {
-		if err := builder.Insert([]byte(term), uint64(i+1)); err != nil {
-			return fmt.Errorf("fst: insert %q failed: %w", term, err)
-		}
-	}
-
-	if err := builder.Close(); err != nil {
-		return fmt.Errorf("fst: builder close failed: %w", err)
-	}
-
-	fst, err := vellum.Load(buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("fst: load failed: %w", err)
-	}
-
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	closeFST(d.fst)
 	d.fst = fst
+	d.built = len(deduped) > 0
+	return nil
+}
+
+// ─── On-disk build ────────────────────────────────────────────────────────────
+
+// BuildToFile builds the FST and writes it atomically to path, then reopens
+// the file via memory mapping so subsequent reads page in from disk on demand.
+//
+// Write is atomic: the FST is first written to path+".tmp", synced, then
+// renamed over path so a crash mid-write never leaves a corrupt file.
+func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
+	deduped := sortAndDedup(terms)
+
+	tmpPath := path + ".tmp"
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("fst: create %s: %w", tmpPath, err)
+	}
+
+	if _, err2 := buildFSTInto(f, deduped); err2 != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err2
+	}
+
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("fst: sync %s: %w", tmpPath, err)
+	}
+	f.Close()
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("fst: rename to %s: %w", path, err)
+	}
+
+	// Reopen as mmap — now the OS owns paging.
+	return d.OpenFromFile(path)
+}
+
+// OpenFromFile opens path as a memory-mapped FST, replacing any existing FST.
+// The old FST (if any) is closed first to release its mmap.
+// Returns an error if the file does not exist or is corrupt.
+func (d *FSTDictionary) OpenFromFile(path string) error {
+	newFST, err := vellum.Open(path)
+	if err != nil {
+		return fmt.Errorf("fst: open %s: %w", path, err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	closeFST(d.fst) // release old mmap
+	d.fst = newFST
 	d.built = true
 	return nil
 }
 
+// Close releases any memory mapping held by the FST.
+// After Close, Contains and PrefixSearch return false/nil until rebuilt.
+func (d *FSTDictionary) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := closeFST(d.fst); err != nil {
+		return err
+	}
+	d.fst = nil
+	d.built = false
+	return nil
+}
+
+// ─── Query API ────────────────────────────────────────────────────────────────
+
 // Contains returns true if term exists exactly in the dictionary.
-// Returns false if the FST has not been built yet.
 func (d *FSTDictionary) Contains(term string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if !d.built || d.fst == nil {
 		return false
 	}
@@ -109,8 +145,10 @@ func (d *FSTDictionary) Contains(term string) bool {
 }
 
 // PrefixSearch returns up to maxResults terms that start with prefix,
-// in lexicographic order. Returns nil if FST not built or prefix not found.
+// in lexicographic order. Returns nil if the FST is not built or no match.
 func (d *FSTDictionary) PrefixSearch(prefix string, maxResults int) ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if !d.built || d.fst == nil {
 		return nil, nil
 	}
@@ -118,15 +156,11 @@ func (d *FSTDictionary) PrefixSearch(prefix string, maxResults int) ([]string, e
 		maxResults = 20
 	}
 
-	// vellum iterator: startInclusive = prefix, endExclusive = prefix+\xff
-	// This scans all keys that start with prefix.
 	startKey := []byte(prefix)
 	endKey := prefixUpperBound(prefix)
 
 	itr, err := d.fst.Iterator(startKey, endKey)
 	if err != nil {
-		// vellum returns an error (not nil iterator) when no keys match.
-		// Treat as empty result.
 		return nil, nil
 	}
 
@@ -136,32 +170,106 @@ func (d *FSTDictionary) PrefixSearch(prefix string, maxResults int) ([]string, e
 		results = append(results, string(key))
 		err = itr.Next()
 	}
-
 	return results, nil
 }
 
-// Size returns the number of terms in the FST.
-// Returns 0 if not built.
+// Size returns the number of terms in the FST. Returns 0 if not built.
 func (d *FSTDictionary) Size() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if !d.built || d.fst == nil {
 		return 0
 	}
 	return int(d.fst.Len())
 }
 
-// IsBuilt returns true if Build() has been called successfully at least once.
+// IsBuilt returns true if Build or OpenFromFile has been called successfully.
 func (d *FSTDictionary) IsBuilt() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.built
 }
 
-// prefixUpperBound returns the smallest byte string that is strictly greater
-// than all strings with the given prefix. Used as the exclusive end key for
-// vellum's prefix iterator.
-//
-// Algorithm: increment the last byte. If overflow, pop and try again.
-// "kubern" → "kubero" (o = n+1)
-// "kubernz" → "kubero" (z overflows → pop, n+1)
-// "\xff\xff" → nil (no upper bound, scan to end)
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// buildFSTInto writes a vellum FST for deduped (already sorted+deduped) terms
+// to w. Returns the loaded FST when w is a *bytes.Buffer (in-memory path),
+// or nil when w is a file (caller will re-open via mmap).
+func buildFSTInto(w interface {
+	Write([]byte) (int, error)
+}, deduped []string) (*vellum.FST, error) {
+	if len(deduped) == 0 {
+		// Return an empty in-memory FST so Contains always returns false cleanly.
+		var buf bytes.Buffer
+		b, err := vellum.New(&buf, nil)
+		if err != nil {
+			return nil, fmt.Errorf("fst: create builder: %w", err)
+		}
+		if err := b.Close(); err != nil {
+			return nil, fmt.Errorf("fst: close empty builder: %w", err)
+		}
+		fst, err := vellum.Load(buf.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("fst: load empty: %w", err)
+		}
+		return fst, nil
+	}
+
+	builder, err := vellum.New(w, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fst: create builder: %w", err)
+	}
+
+	for i, term := range deduped {
+		if err := builder.Insert([]byte(term), uint64(i+1)); err != nil {
+			return nil, fmt.Errorf("fst: insert %q: %w", term, err)
+		}
+	}
+	if err := builder.Close(); err != nil {
+		return nil, fmt.Errorf("fst: builder close: %w", err)
+	}
+
+	// For in-memory path (bytes.Buffer), load and return the FST.
+	if buf, ok := w.(*bytes.Buffer); ok {
+		fst, err := vellum.Load(buf.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("fst: load: %w", err)
+		}
+		return fst, nil
+	}
+
+	// For file path, caller re-opens via vellum.Open (mmap).
+	return nil, nil
+}
+
+// sortAndDedup returns a sorted, deduplicated copy of terms.
+func sortAndDedup(terms []string) []string {
+	if len(terms) == 0 {
+		return nil
+	}
+	cp := make([]string, len(terms))
+	copy(cp, terms)
+	sort.Strings(cp)
+	out := cp[:0]
+	for i, t := range cp {
+		if i == 0 || t != cp[i-1] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// closeFST closes fst if non-nil, ignoring nil. Used for mmap cleanup.
+func closeFST(fst *vellum.FST) error {
+	if fst != nil {
+		return fst.Close()
+	}
+	return nil
+}
+
+// prefixUpperBound returns the smallest byte string strictly greater than all
+// strings starting with prefix. Used as the exclusive end key for vellum's
+// prefix iterator.
 func prefixUpperBound(prefix string) []byte {
 	b := []byte(prefix)
 	for i := len(b) - 1; i >= 0; i-- {
@@ -172,6 +280,5 @@ func prefixUpperBound(prefix string) []byte {
 			return upper
 		}
 	}
-	// All bytes are 0xff — no upper bound, iterate to FST end.
 	return nil
 }

@@ -53,7 +53,8 @@ type Engine struct {
 	// introduces new terms. Wired to the analyzer via the FSTWirer interface
 	// so that resolveTerm() uses the current indexed vocabulary.
 	fst     *analysis.FSTDictionary
-	fstSize int // len(globalSeen) at the time of the last successful Build()
+	fstSize int    // len(globalSeen) at the time of the last successful Build()
+	fstPath string // on-disk path; empty = in-memory only (tests)
 
 	// Optional storage-layer term sink. When set, RebuildFST() forwards all
 	// vocabulary terms to termStore.AddTerms() so the storage FST stays in sync.
@@ -84,10 +85,22 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 // Add() to ensure the storage FST is populated from the first document onward.
 func (e *Engine) SetTermStore(s TermStore) { e.termStore = s }
 
-// RebuildFST rebuilds the FST from the current global vocabulary snapshot,
-// wires it to the analyzer (if it implements FSTWirer), and notifies the
-// optional TermStore. Safe to call from any goroutine — takes a brief RLock
-// on the inverted index.
+// SetFSTPath sets the on-disk path for the FST file.
+// When set, RebuildFST writes the FST to disk (atomic rename) and reopens it
+// via memory mapping — keeping RAM usage near zero regardless of vocabulary
+// size. Load() will also load the FST from disk instead of rebuilding.
+// Call before the first Add() or Load().
+func (e *Engine) SetFSTPath(path string) { e.fstPath = path }
+
+// RebuildFST rebuilds the FST from the current global vocabulary snapshot.
+//
+// If a fstPath is set (via SetFSTPath), the FST is written atomically to disk
+// and reopened via memory mapping — only the accessed pages stay in RAM.
+// If no path is set, the FST is kept in-memory (useful for tests).
+//
+// After building, the FST is wired into the analyzer (if it implements
+// FSTWirer) and all terms are forwarded to the optional TermStore.
+// Safe to call from any goroutine — takes a brief RLock on the inverted index.
 func (e *Engine) RebuildFST() error {
 	e.inverted.RLock()
 	glob := e.inverted.GetGlobalSeen()
@@ -98,8 +111,14 @@ func (e *Engine) RebuildFST() error {
 	e.fstSize = len(glob)
 	e.inverted.RUnlock()
 
-	if err := e.fst.Build(terms); err != nil {
-		return fmt.Errorf("index: fst build: %w", err)
+	var buildErr error
+	if e.fstPath != "" {
+		buildErr = e.fst.BuildToFile(terms, e.fstPath)
+	} else {
+		buildErr = e.fst.Build(terms)
+	}
+	if buildErr != nil {
+		return fmt.Errorf("index: fst build: %w", buildErr)
 	}
 
 	// Wire the rebuilt FST into the analyzer so resolveTerm() is live.
@@ -640,13 +659,33 @@ func (e *Engine) Save(filepath string) error {
 	return nil
 }
 
-// Load restores index state from a gob file written by Save, then rebuilds
-// the FST so query-time term resolution is live immediately after startup.
+// Load restores index state from a gob file written by Save, then makes the
+// FST live for query-time term resolution.
+//
+// Fast path (fstPath set + file exists): opens the pre-built on-disk FST via
+// memory mapping. No rebuild needed — startup is O(1) regardless of vocab size.
+//
+// Slow path (no path, or file missing): rebuilds the FST from the restored
+// globalSeen and, if a path is set, writes it to disk for next startup.
 func (e *Engine) Load(filepath string) error {
 	if err := e.load(filepath); err != nil {
 		return err
 	}
-	// Rebuild FST outside the write locks (RebuildFST takes RLock internally).
+
+	// Fast path: the FST file was written by the last RebuildFST call and
+	// represents the same vocabulary stored in the gob file.
+	if e.fstPath != "" {
+		if err := e.fst.OpenFromFile(e.fstPath); err == nil {
+			if w, ok := e.analyzer.(analysis.FSTWirer); ok {
+				w.SetFST(e.fst)
+			}
+			slog.Info("index: FST loaded from disk", "path", e.fstPath, "terms", e.fst.Size())
+			return nil
+		}
+		slog.Info("index: FST file not found, rebuilding", "path", e.fstPath)
+	}
+
+	// Slow path: rebuild from globalSeen (also saves to disk if path is set).
 	if err := e.RebuildFST(); err != nil {
 		slog.Warn("index: FST rebuild after load failed", "error", err)
 	}

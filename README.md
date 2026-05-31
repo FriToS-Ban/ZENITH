@@ -98,14 +98,14 @@ zenith search <query>     │
 
 ZENITH's index is backed by a full LSM-tree implementation — the same architecture used by RocksDB, LevelDB, and etcd's backend storage. Nothing is outsourced to SQLite or an embedded key-value library.
 
-| Component       | Implementation                           | Status         |
-| --------------- | ---------------------------------------- | -------------- |
-| Write-Ahead Log | Append-only, crash-safe                  | ✅             |
-| MemTable        | Skip-list (sorted, O(log n) ops)         | 🔧 in progress |
-| SSTable         | Immutable disk-backed sorted tables      | ✅             |
-| Compactor       | Leveled compaction, background merge     | 🔲 planned     |
-| Bloom Filter    | Probabilistic O(1) disk-lookup bypass    | ✅             |
-| Sparse Index    | Memory-efficient offset map for SSTables | ✅             |
+| Component       | Implementation                           | Status |
+| --------------- | ---------------------------------------- | ------ |
+| Write-Ahead Log | Append-only, crash-safe                  | ✅     |
+| MemTable        | Skip-list (sorted, O(log n) ops)         | ✅     |
+| SSTable         | Immutable disk-backed sorted tables      | ✅     |
+| Compactor       | Leveled compaction, background merge     | ✅     |
+| Bloom Filter    | Probabilistic O(1) disk-lookup bypass    | ✅     |
+| Sparse Index    | Memory-efficient offset map for SSTables | ✅     |
 
 The WAL guarantees that no indexed document is lost on crash. Bloom filters mean queries never hit disk for documents that don't exist. Compaction keeps read amplification bounded as the index grows.
 
@@ -226,7 +226,7 @@ service ZenithService {
 - [x] Levenshtein distance
 - [x] BK-tree fuzzy matching (wiring in progress)
 - [x] Synonym expansion
-- [ ] Finite State Transducers — future enhancement
+- [x] Finite State Transducers — future enhancement
 
 ### ✅ Phase 4 — Storage Engine
 
@@ -239,11 +239,11 @@ service ZenithService {
 
 ### 🔧 Phase 5 — CLI + Local Embeddings (current)
 
-- [ ] `cobra` CLI: `index`, `search`, `serve`, `version`
-- [ ] File crawler with `fsnotify` incremental watching
-- [ ] Ollama embedder integration (`nomic-embed-text`)
+- [x] `cobra` CLI: `index`, `search`, `serve`, `version`
+- [x] File crawler with `fsnotify` incremental watching
+- [x] Ollama embedder integration (`nomic-embed-text`)
 - [ ] OpenAI embedder (optional flag)
-- [ ] Per-file type text extractors (`.md`, `.go`, `.pdf`, `.html`)
+- [x] Per-file type text extractors (`.md`, `.go`, `.pdf`, `.html`)
 - [ ] `goreleaser` binary releases
 
 ### 🔲 Phase 6 — Production Observability

@@ -8,6 +8,8 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+
+	"github.com/shramanb113/ZENITH/internal/storage/memtable"
 )
 
 var (
@@ -340,4 +342,60 @@ func (r *Reader) Get(key []byte) ([]byte, bool) {
 
 func (r *Reader) Close() error {
 	return r.file.Close()
+}
+
+// IterateAll returns every entry in the SSTable in lexicographic key order.
+// Called by the compactor to perform k-way merges across multiple SSTables.
+func (r *Reader) IterateAll() ([]memtable.Entry, error) {
+	var all []memtable.Entry
+	for _, idx := range r.index {
+		blocks, err := r.readBlock(idx)
+		if err != nil {
+			return nil, fmt.Errorf("sstable: iterate block at offset %d: %w", idx.Offset, err)
+		}
+		for _, b := range blocks {
+			key := make([]byte, len(b.key))
+			copy(key, b.key)
+			var val []byte
+			if len(b.value) > 0 {
+				val = make([]byte, len(b.value))
+				copy(val, b.value)
+			}
+			all = append(all, memtable.Entry{
+				Key:     key,
+				Value:   val,
+				Deleted: b.deleted,
+			})
+		}
+	}
+	return all, nil
+}
+
+// MaxKey returns the largest key in the SSTable (last key of the last index block).
+func (r *Reader) MaxKey() []byte {
+	if len(r.index) == 0 {
+		return nil
+	}
+	src := r.index[len(r.index)-1].LastKey
+	k := make([]byte, len(src))
+	copy(k, src)
+	return k
+}
+
+// MinKey returns the smallest key in the SSTable by reading the first entry of
+// the first data block.
+func (r *Reader) MinKey() ([]byte, error) {
+	if len(r.index) == 0 {
+		return nil, nil
+	}
+	blocks, err := r.readBlock(r.index[0])
+	if err != nil {
+		return nil, fmt.Errorf("sstable: read first block for min key: %w", err)
+	}
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	k := make([]byte, len(blocks[0].key))
+	copy(k, blocks[0].key)
+	return k, nil
 }

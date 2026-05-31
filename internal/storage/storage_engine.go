@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/storage/compaction"
 	"github.com/shramanb113/ZENITH/internal/storage/memtable"
 	"github.com/shramanb113/ZENITH/internal/storage/sstable"
 	"github.com/shramanb113/ZENITH/internal/storage/wal"
@@ -24,6 +25,7 @@ import (
 //	Read path:   active MemTable → immutable MemTables → SSTables (via Bloom + index)
 //	FST:         rebuilt from global term vocabulary after every SSTable flush
 //	             and on explicit Save() — gives O(log n) prefix search
+//	Compaction:  background leveled compaction via Compactor
 //
 // The Engine is safe for concurrent use. Multiple goroutines may call Put,
 // Delete, and Get simultaneously. Flush is serialised via the GroupCommitter.
@@ -45,6 +47,9 @@ type Engine struct {
 	// SSTable flush pipeline — group committer batches concurrent flushes.
 	committer  *sstable.GroupCommitter
 	sstCounter atomic.Uint64
+
+	// Leveled compactor — runs in the background, triggered on each flush.
+	compactor *compaction.Compactor
 
 	// FST dictionary — rebuilt from the term vocabulary after every flush.
 	// Provides O(log n) exact lookup and prefix search over indexed terms.
@@ -79,6 +84,10 @@ type EngineConfig struct {
 
 	// WALConfig is passed directly to wal.OpenWAL.
 	WALConfig wal.WALConfig
+
+	// CompactorConfig tunes the background leveled compactor.
+	// Dir is overridden to match SSTDir at Open time.
+	CompactorConfig compaction.CompactorConfig
 }
 
 // DefaultEngineConfig returns a production-ready config.
@@ -91,6 +100,13 @@ func DefaultEngineConfig() EngineConfig {
 		WALConfig: wal.WALConfig{
 			SyncMode: wal.SyncAlways,
 			Dir:      "./data/wal",
+		},
+		CompactorConfig: compaction.CompactorConfig{
+			L0Threshold:        4,
+			LevelSizeBase:      10 * 1024 * 1024, // 10 MB
+			LevelSizeMult:      10,
+			MaxLevels:          7,
+			CompactionInterval: 30 * time.Second,
 		},
 	}
 }
@@ -133,6 +149,12 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	}
 
 	e.committer = sstable.NewGroupCommitter(cfg.CommitWindow, e.nextSSTPath)
+
+	// Start the leveled compactor. Dir is pinned to SSTDir so compacted files
+	// land in the same directory as flushed SSTables.
+	cfg.CompactorConfig.Dir = cfg.SSTDir
+	e.compactor = compaction.NewCompactor(cfg.CompactorConfig)
+	e.compactor.Run()
 
 	return e, nil
 }
@@ -309,6 +331,28 @@ func (e *Engine) flushImmutable(mt *memtable.MemTable) error {
 
 	slog.Info("SSTable written", "path", path, "entries", len(entries))
 
+	// Register with the compactor so it can track L0 file count and trigger
+	// compaction when the threshold is reached. Min/max keys are read directly
+	// from the sorted entries slice (first and last entries).
+	if e.compactor != nil {
+		var size int64
+		if info, err2 := os.Stat(path); err2 == nil {
+			size = info.Size()
+		}
+		minKey := make([]byte, len(entries[0].Key))
+		copy(minKey, entries[0].Key)
+		maxKey := make([]byte, len(entries[len(entries)-1].Key))
+		copy(maxKey, entries[len(entries)-1].Key)
+
+		e.compactor.AddSSTable(&compaction.SSTableMeta{
+			Path:   path,
+			MinKey: minKey,
+			MaxKey: maxKey,
+			Size:   size,
+			Level:  0,
+		})
+	}
+
 	e.removeImmutable(mt)
 
 	// Rebuild FST after every flush so prefix search reflects new terms.
@@ -353,8 +397,9 @@ func (e *Engine) ForceFlush() error {
 // Close gracefully shuts down the engine:
 //  1. Flushes the active MemTable to an SSTable
 //  2. Waits for all background flushes to complete
-//  3. Rebuilds the FST one final time
-//  4. Closes the WAL
+//  3. Stops the background compactor
+//  4. Rebuilds the FST one final time
+//  5. Closes the WAL
 func (e *Engine) Close() error {
 	var closeErr error
 	e.closeOnce.Do(func() {
@@ -366,6 +411,10 @@ func (e *Engine) Close() error {
 		}
 
 		e.flushWg.Wait()
+
+		if e.compactor != nil {
+			e.compactor.Stop()
+		}
 
 		if err := e.RebuildFST(); err != nil {
 			slog.Warn("Final FST rebuild failed", "error", err)

@@ -98,14 +98,14 @@ zenith search <query>     │
 
 ZENITH's index is backed by a full LSM-tree implementation — the same architecture used by RocksDB, LevelDB, and etcd's backend storage. Nothing is outsourced to SQLite or an embedded key-value library.
 
-| Component | Implementation | Status |
-|---|---|---|
-| Write-Ahead Log | Append-only, crash-safe | ✅ |
-| MemTable | Skip-list (sorted, O(log n) ops) | 🔧 in progress |
-| SSTable | Immutable disk-backed sorted tables | ✅ |
-| Compactor | Leveled compaction, background merge | 🔲 planned |
-| Bloom Filter | Probabilistic O(1) disk-lookup bypass | ✅ |
-| Sparse Index | Memory-efficient offset map for SSTables | ✅ |
+| Component       | Implementation                           | Status         |
+| --------------- | ---------------------------------------- | -------------- |
+| Write-Ahead Log | Append-only, crash-safe                  | ✅             |
+| MemTable        | Skip-list (sorted, O(log n) ops)         | 🔧 in progress |
+| SSTable         | Immutable disk-backed sorted tables      | ✅             |
+| Compactor       | Leveled compaction, background merge     | 🔲 planned     |
+| Bloom Filter    | Probabilistic O(1) disk-lookup bypass    | ✅             |
+| Sparse Index    | Memory-efficient offset map for SSTables | ✅             |
 
 The WAL guarantees that no indexed document is lost on crash. Bloom filters mean queries never hit disk for documents that don't exist. Compaction keeps read amplification bounded as the index grows.
 
@@ -114,6 +114,7 @@ The WAL guarantees that no indexed document is lost on crash. Bloom filters mean
 ## Search Pipeline
 
 ### Lexical Layer
+
 - Inverted index with BM25/TF-IDF scoring
 - Porter stemming (`jumping` → `jump`)
 - Edge N-grams for prefix / search-as-you-type
@@ -121,17 +122,20 @@ The WAL guarantees that no indexed document is lost on crash. Bloom filters mean
 - Synonym expansion
 
 ### Fuzzy Layer
+
 - BK-tree over Levenshtein distance — O(log n) lookup with edit-distance pruning
 - Tolerates up to `MAX_DISTANCE` edits (configurable)
 - Integrated into both indexing and query paths
 
 ### Semantic Layer
+
 - Local embeddings via Ollama (`nomic-embed-text`, runs fully offline)
 - Optional OpenAI embeddings (`--embedder openai`)
 - Cosine similarity + L2 distance
 - Deterministic hash embeddings as fallback (no Ollama required)
 
 ### Ranking
+
 - Reciprocal Rank Fusion (RRF) merges lexical and semantic result lists
 - Score normalization before fusion
 - Weighted fusion tunable via config
@@ -144,14 +148,14 @@ ZENITH instruments itself the way a production service should. When running `zen
 
 **Prometheus metrics** (`/metrics` on configurable port):
 
-| Metric | Description |
-|---|---|
-| `zenith_index_duration_seconds` | Time to index each file, by file type |
-| `zenith_search_latency_seconds` | Query latency by search mode (lexical / semantic / hybrid) |
-| `zenith_indexed_documents_total` | Total documents in the index |
-| `zenith_embedding_calls_total` | Embedder invocations and errors |
-| `zenith_wal_writes_total` | WAL append operations |
-| `zenith_bloom_filter_hits_total` | Bloom filter hit/miss ratio |
+| Metric                           | Description                                                |
+| -------------------------------- | ---------------------------------------------------------- |
+| `zenith_index_duration_seconds`  | Time to index each file, by file type                      |
+| `zenith_search_latency_seconds`  | Query latency by search mode (lexical / semantic / hybrid) |
+| `zenith_indexed_documents_total` | Total documents in the index                               |
+| `zenith_embedding_calls_total`   | Embedder invocations and errors                            |
+| `zenith_wal_writes_total`        | WAL append operations                                      |
+| `zenith_bloom_filter_hits_total` | Bloom filter hit/miss ratio                                |
 
 **OpenTelemetry traces**: spans across the full query path — `crawler.Walk` → `embedder.Embed` → `storage.Write` → `search.Query` → `ranker.RRF`. Export to any OTLP-compatible backend (Grafana Tempo, Jaeger).
 
@@ -166,12 +170,12 @@ zenith serve --metrics-port 9090 --tracing-endpoint localhost:4317
 
 ## File Support
 
-| Format | Extraction |
-|---|---|
-| `.txt`, `.md` | Direct text |
+| Format              | Extraction                                    |
+| ------------------- | --------------------------------------------- |
+| `.txt`, `.md`       | Direct text                                   |
 | `.go`, `.py`, `.ts` | Source code (comment + identifier extraction) |
-| `.pdf` | Text layer extraction |
-| `.html` | Tag-stripped text |
+| `.pdf`              | Text layer extraction                         |
+| `.html`             | Tag-stripped text                             |
 
 ZENITH watches indexed directories with `fsnotify`. Changed files are re-indexed incrementally using mtime + content hash — not full re-crawls.
 
@@ -196,6 +200,7 @@ service ZenithService {
 ## Build Roadmap
 
 ### ✅ Phase 1 — Core Foundation
+
 - [x] Inverted index, map-based postings lists
 - [x] Tokenization, stop-word filtering, lowercasing
 - [x] gRPC service definition and Protobuf contract
@@ -204,6 +209,7 @@ service ZenithService {
 - [x] Binary persistence with `encoding/gob` and graceful shutdown
 
 ### ✅ Phase 2 — Neural Intelligence
+
 - [x] Distributed coordinator and modulo sharding
 - [x] Vector map integration and high-dimensional schema
 - [x] Dot product and magnitude in pure Go
@@ -213,6 +219,7 @@ service ZenithService {
 - [x] Reciprocal Rank Fusion (RRF)
 
 ### ✅ Phase 3 — Linguistic Mastery
+
 - [x] Porter stemming
 - [x] Edge N-grams
 - [x] Phonetic matching (Soundex/Metaphone)
@@ -222,14 +229,16 @@ service ZenithService {
 - [ ] Finite State Transducers — future enhancement
 
 ### ✅ Phase 4 — Storage Engine
+
 - [x] Write-Ahead Log (WAL)
-- [ ] MemTable skip-list (replacing current hashmap)
+- [x] MemTable skip-list (replacing current hashmap)
 - [x] SSTables (group committer improvement pending)
-- [ ] Leveled compaction
+- [x] Leveled compaction
 - [x] Bloom filters
 - [x] Sparse index
 
 ### 🔧 Phase 5 — CLI + Local Embeddings (current)
+
 - [ ] `cobra` CLI: `index`, `search`, `serve`, `version`
 - [ ] File crawler with `fsnotify` incremental watching
 - [ ] Ollama embedder integration (`nomic-embed-text`)
@@ -238,16 +247,18 @@ service ZenithService {
 - [ ] `goreleaser` binary releases
 
 ### 🔲 Phase 6 — Production Observability
+
 - [ ] Prometheus metrics exporter (custom Go instrumentation)
 - [ ] OpenTelemetry trace spans across full query path
 - [ ] `make dev-stack` — local Prometheus + Grafana + Tempo
 - [ ] `/metrics` endpoint on `zenith serve`
 
 ### 🔲 Phase 7 — Storage Hardening
-- [ ] MemTable skip-list replacement
-- [ ] Leveled compaction background worker
-- [ ] SSTable group committer
-- [ ] WAL recovery benchmarks
+
+- [x] MemTable skip-list replacement
+- [x] Leveled compaction background worker
+- [x] SSTable group committer
+- [x] WAL recovery benchmarks
 
 ---
 

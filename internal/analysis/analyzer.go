@@ -14,6 +14,7 @@ const (
 	WORD     TokenType = iota
 	NGRAM              // produced by edge n-gram expansion
 	PHONETIC           // produced by Soundex/Metaphone
+	SYNONYM            // produced by synonym expansion
 )
 
 // Token is a single unit of analysis with position and type metadata.
@@ -24,7 +25,6 @@ type Token struct {
 }
 
 // Analyzer is the interface the Engine depends on.
-// Any struct implementing Analyze can be injected as the Engine's analyzer.
 type Analyzer interface {
 	Analyze(text string) []Token
 }
@@ -35,15 +35,27 @@ type Analyzer interface {
 //  3. Stop-word removal
 //  4. Snowball Porter2 stemming (kljensen/snowball, english)
 //
-// The internal *Stemmer field has been removed — snowball.Stem is a
-// stateless function call, no struct needed, one less allocation per token.
+// FST integration:
+//   - The analyzer holds a reference to the shared FSTDictionary.
+//   - After stemming, each token is checked against the FST.
+//   - If the FST is built and the stemmed token IS found: used as-is.
+//   - If the FST is built and the token is NOT found: prefix-expand via
+//     PrefixSearch to find the closest indexed term. This handles cases
+//     where a query contains an un-indexed stem that is a prefix of
+//     something that was indexed (e.g. query "kubern" → index has "kubernet").
+//   - If the FST is not built yet: fall through silently (no-op).
+//
+// Synonym expansion:
+//   - Applied at query time via AnalyzeQuery() — NOT in Analyze().
+//   - Indexing with synonyms bloats the index and breaks IDF weights.
 type StandardAnalyzer struct {
 	stopWords  map[string]struct{}
-	tokenRegex *regexp.Regexp // compiled once at init
+	tokenRegex *regexp.Regexp
+	fst        *FSTDictionary // may be nil if not wired
 }
 
-// NewStandardAnalyzer constructs a StandardAnalyzer with a full English
-// stop-word list and a camelCase-aware token regex.
+// NewStandardAnalyzer constructs a StandardAnalyzer without FST.
+// Call SetFST() after building the index to enable FST-assisted lookup.
 func NewStandardAnalyzer() *StandardAnalyzer {
 	stopList := []string{
 		"a", "about", "above", "after", "again", "against", "all", "am",
@@ -70,15 +82,20 @@ func NewStandardAnalyzer() *StandardAnalyzer {
 	}
 
 	return &StandardAnalyzer{
-		stopWords: stopMap,
-		// Handles camelCase, PascalCase, acronyms, lowercase alphanumeric.
-		// AP-1: compiled once — not per call.
+		stopWords:  stopMap,
 		tokenRegex: regexp.MustCompile(`[A-Z][a-z0-9]*|[a-z0-9]+|[A-Z]+`),
 	}
 }
 
+// SetFST wires the FST dictionary into the analyzer.
+// Call this after engine.Load() or after the first FST.Build() completes.
+// Thread-safe write — engine must not be serving queries during this call.
+func (a *StandardAnalyzer) SetFST(fst *FSTDictionary) {
+	a.fst = fst
+}
+
 // stem calls kljensen/snowball's English Porter2 stemmer.
-// Returns the original word unchanged on error (graceful degradation).
+// Returns the original word unchanged on error.
 func stem(word string) string {
 	s, err := snowball.Stem(word, "english", true)
 	if err != nil {
@@ -87,9 +104,30 @@ func stem(word string) string {
 	return s
 }
 
+// resolveTerm applies FST-assisted term resolution on a stemmed token.
+// If the FST is not built, returns the token unchanged.
+// If the exact stem is found in the FST, returns it unchanged.
+// If not found, attempts prefix search to find the closest indexed term.
+// Falls back to the original stem if prefix search yields nothing.
+func (a *StandardAnalyzer) resolveTerm(stemmed string) string {
+	if a.fst == nil || !a.fst.IsBuilt() {
+		return stemmed
+	}
+	if a.fst.Contains(stemmed) {
+		return stemmed
+	}
+	// Prefix search: find the first indexed term that starts with this stem.
+	// This handles query stems that are shorter than their indexed counterparts.
+	matches, _ := a.fst.PrefixSearch(stemmed, 1)
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return stemmed
+}
+
 // Tokenize returns stemmed, filtered string tokens from text.
-// Used directly by the BM25/TF-IDF scorers and the BKTree build path.
-// Single pass: regex → lowercase → stop-word filter → stem.
+// FST resolution is applied per token when the FST is built.
+// Used by BM25/TF-IDF scorers and the BKTree build path.
 func (a *StandardAnalyzer) Tokenize(text string) []string {
 	raw := a.tokenRegex.FindAllString(text, -1)
 	out := make([]string, 0, len(raw))
@@ -98,16 +136,18 @@ func (a *StandardAnalyzer) Tokenize(text string) []string {
 		if _, stop := a.stopWords[tok]; stop {
 			continue
 		}
-		if s := stem(tok); s != "" {
-			out = append(out, s)
+		s := stem(tok)
+		if s == "" {
+			continue
 		}
+		out = append(out, a.resolveTerm(s))
 	}
 	return out
 }
 
 // Analyze implements the Analyzer interface.
 // Returns structured Tokens with position and type metadata.
-// Internally calls Tokenize — one codepath, no duplication.
+// Does NOT expand synonyms — use AnalyzeQuery for query-time expansion.
 func (a *StandardAnalyzer) Analyze(text string) []Token {
 	terms := a.Tokenize(text)
 	tokens := make([]Token, len(terms))
@@ -117,6 +157,37 @@ func (a *StandardAnalyzer) Analyze(text string) []Token {
 			Position: i,
 			Type:     WORD,
 		}
+	}
+	return tokens
+}
+
+// AnalyzeQuery is the query-time counterpart of Analyze.
+// It applies the full pipeline plus synonym expansion.
+// Never call this during indexing — only for incoming search queries.
+//
+// Pipeline: tokenise → lowercase → stop-word filter → stem → FST resolve → synonym expand
+func (a *StandardAnalyzer) AnalyzeQuery(query string) []Token {
+	baseTokens := a.Tokenize(query)
+	expanded := ExpandWithSynonyms(baseTokens)
+
+	tokens := make([]Token, 0, len(expanded))
+	baseSet := make(map[string]struct{}, len(baseTokens))
+	for _, t := range baseTokens {
+		baseSet[t] = struct{}{}
+	}
+
+	pos := 0
+	for _, term := range expanded {
+		typ := WORD
+		if _, isBase := baseSet[term]; !isBase {
+			typ = SYNONYM
+		}
+		tokens = append(tokens, Token{
+			Term:     term,
+			Position: pos,
+			Type:     typ,
+		})
+		pos++
 	}
 	return tokens
 }

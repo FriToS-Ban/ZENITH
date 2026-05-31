@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"encoding/gob"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"maps"
@@ -21,6 +22,13 @@ type SearchResponse struct {
 	Score float64
 }
 
+// TermStore is implemented by storage backends that maintain a term vocabulary.
+// storage.Engine satisfies this interface — wire it via Engine.SetTermStore()
+// so the storage-layer FST stays in sync with the index vocabulary.
+type TermStore interface {
+	AddTerms([]string)
+}
+
 // Engine is the central orchestrator — it owns all sub-indexes and the
 // scoring pipeline. All public methods are safe for concurrent use.
 type Engine struct {
@@ -30,9 +38,9 @@ type Engine struct {
 	phonetics *PhoneticIndex
 	bkTree    *analysis.BKTree
 
-	embedder embedding.Embedder
-	scorer   ranking.Scorer
-	analyzer analysis.Analyzer
+	embedder  embedding.Embedder
+	scorer    ranking.Scorer
+	analyzer  analysis.Analyzer
 
 	// Supplementary scorers wired alongside the primary Scorer.
 	// Both are updated on every Add/Remove so they stay in sync.
@@ -40,6 +48,16 @@ type Engine struct {
 	tfidf *ranking.TFIDFScorer
 
 	idMapping map[uint32]string
+
+	// FST term dictionary — rebuilt from globalSeen after every Add() that
+	// introduces new terms. Wired to the analyzer via the FSTWirer interface
+	// so that resolveTerm() uses the current indexed vocabulary.
+	fst     *analysis.FSTDictionary
+	fstSize int // len(globalSeen) at the time of the last successful Build()
+
+	// Optional storage-layer term sink. When set, RebuildFST() forwards all
+	// vocabulary terms to termStore.AddTerms() so the storage FST stays in sync.
+	termStore TermStore
 }
 
 // NewEngine constructs a fully initialised Engine.
@@ -57,12 +75,83 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		idMapping: make(map[uint32]string),
 		bm25:      ranking.NewBM25Scorer(ranking.BM25Params{}),
 		tfidf:     ranking.NewTFIDFScorer(),
+		fst:       analysis.NewFSTDictionary(),
 	}
+}
+
+// SetTermStore wires an optional storage backend so that RebuildFST() also
+// forwards the full vocabulary to termStore.AddTerms(). Call before the first
+// Add() to ensure the storage FST is populated from the first document onward.
+func (e *Engine) SetTermStore(s TermStore) { e.termStore = s }
+
+// RebuildFST rebuilds the FST from the current global vocabulary snapshot,
+// wires it to the analyzer (if it implements FSTWirer), and notifies the
+// optional TermStore. Safe to call from any goroutine — takes a brief RLock
+// on the inverted index.
+func (e *Engine) RebuildFST() error {
+	e.inverted.RLock()
+	glob := e.inverted.GetGlobalSeen()
+	terms := make([]string, 0, len(glob))
+	for t := range glob {
+		terms = append(terms, t)
+	}
+	e.fstSize = len(glob)
+	e.inverted.RUnlock()
+
+	if err := e.fst.Build(terms); err != nil {
+		return fmt.Errorf("index: fst build: %w", err)
+	}
+
+	// Wire the rebuilt FST into the analyzer so resolveTerm() is live.
+	if w, ok := e.analyzer.(analysis.FSTWirer); ok {
+		w.SetFST(e.fst)
+	}
+
+	// Propagate vocabulary to the storage layer (optional).
+	if e.termStore != nil {
+		e.termStore.AddTerms(terms)
+	}
+
+	slog.Info("index: FST rebuilt", "terms", len(terms))
+	return nil
+}
+
+// rebuildFSTIfNeeded calls RebuildFST only when globalSeen has grown since the
+// last build. Called after every successful Add() to keep the FST current with
+// minimal overhead.
+func (e *Engine) rebuildFSTIfNeeded() {
+	e.inverted.RLock()
+	currentSize := len(e.inverted.GetGlobalSeen())
+	e.inverted.RUnlock()
+	if currentSize <= e.fstSize {
+		return
+	}
+	if err := e.RebuildFST(); err != nil {
+		slog.Warn("index: FST rebuild failed", "error", err)
+	}
+}
+
+// FSTContains returns true if term is in the current FST vocabulary.
+func (e *Engine) FSTContains(term string) bool { return e.fst.Contains(term) }
+
+// FSTPrefixSearch returns up to maxResults indexed terms that begin with prefix.
+func (e *Engine) FSTPrefixSearch(prefix string, maxResults int) ([]string, error) {
+	return e.fst.PrefixSearch(prefix, maxResults)
 }
 
 // Add indexes a document. Safe to call with the same originalID to re-index
 // (idempotent — old entries are removed cleanly before new ones are written).
+// After each successful index, the FST is rebuilt if new terms were added,
+// keeping query-time prefix resolution and the optional TermStore current.
 func (e *Engine) Add(ctx context.Context, originalID string, fullText string) error {
+	if err := e.add(ctx, originalID, fullText); err != nil {
+		return err
+	}
+	e.rebuildFSTIfNeeded()
+	return nil
+}
+
+func (e *Engine) add(ctx context.Context, originalID string, fullText string) error {
 	logger := slog.With("doc_id", originalID)
 
 	tokens := e.analyzer.Analyze(fullText)
@@ -190,8 +279,18 @@ func (e *Engine) Add(ctx context.Context, originalID string, fullText string) er
 // Search executes a hybrid query: lexical (n-gram + phonetic + fuzzy) +
 // semantic (vector) + neural expansion on weak results.
 // Returns results ranked by the configured Scorer (default: RRF).
+//
+// Query analysis path:
+//   - If the analyzer implements QueryAnalyzer, AnalyzeQuery() is used so that
+//     synonym expansion and FST prefix resolution both fire.
+//   - Otherwise falls back to the base Analyze() method.
 func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, error) {
-	tokens := e.analyzer.Analyze(query)
+	var tokens []analysis.Token
+	if qa, ok := e.analyzer.(analysis.QueryAnalyzer); ok {
+		tokens = qa.AnalyzeQuery(query)
+	} else {
+		tokens = e.analyzer.Analyze(query)
+	}
 	rawTokens := make([]string, 0, len(tokens))
 	for _, t := range tokens {
 		rawTokens = append(rawTokens, t.Term)
@@ -541,8 +640,20 @@ func (e *Engine) Save(filepath string) error {
 	return nil
 }
 
-// Load restores index state from a gob file written by Save.
+// Load restores index state from a gob file written by Save, then rebuilds
+// the FST so query-time term resolution is live immediately after startup.
 func (e *Engine) Load(filepath string) error {
+	if err := e.load(filepath); err != nil {
+		return err
+	}
+	// Rebuild FST outside the write locks (RebuildFST takes RLock internally).
+	if err := e.RebuildFST(); err != nil {
+		slog.Warn("index: FST rebuild after load failed", "error", err)
+	}
+	return nil
+}
+
+func (e *Engine) load(filepath string) error {
 	start := time.Now()
 	e.inverted.Lock()
 	e.vectors.Lock()

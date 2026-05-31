@@ -1,0 +1,400 @@
+// Engine orchestrator
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/storage/memtable"
+	"github.com/shramanb113/ZENITH/internal/storage/sstable"
+	"github.com/shramanb113/ZENITH/internal/storage/wal"
+)
+
+// Engine orchestrates the full LSM storage pipeline:
+//
+//	Write path:  WAL → active MemTable → (freeze) → SSTable flush
+//	Read path:   active MemTable → immutable MemTables → SSTables (via Bloom + index)
+//	FST:         rebuilt from global term vocabulary after every SSTable flush
+//	             and on explicit Save() — gives O(log n) prefix search
+//
+// The Engine is safe for concurrent use. Multiple goroutines may call Put,
+// Delete, and Get simultaneously. Flush is serialised via the GroupCommitter.
+type Engine struct {
+	cfg EngineConfig
+
+	// WAL — written before every MemTable mutation for crash safety.
+	walFile *wal.WAL
+
+	// Active MemTable — receives all current writes.
+	mu     sync.RWMutex
+	active *memtable.MemTable
+
+	// Immutable MemTables waiting to be flushed. In practice this slice
+	// rarely holds more than one entry; it grows only if flushing falls
+	// behind write rate.
+	immutable []*memtable.MemTable
+
+	// SSTable flush pipeline — group committer batches concurrent flushes.
+	committer  *sstable.GroupCommitter
+	sstCounter atomic.Uint64
+
+	// FST dictionary — rebuilt from the term vocabulary after every flush.
+	// Provides O(log n) exact lookup and prefix search over indexed terms.
+	fst *analysis.FSTDictionary
+
+	// Global term vocabulary — accumulated across all indexed documents.
+	// Mirrors what the index/engine.go's InvertedIndex.globalSeen holds,
+	// but owned here for the storage-layer FST rebuild.
+	vocabMu sync.RWMutex
+	vocab   map[string]struct{}
+
+	// Lifecycle
+	closeOnce sync.Once
+	closed    chan struct{}
+	flushWg   sync.WaitGroup
+}
+
+// EngineConfig holds storage engine parameters.
+type EngineConfig struct {
+	// WALPath is the path to the WAL file (e.g. "./data/wal/zenith.wal").
+	WALPath string
+
+	// SSTDir is the directory where SSTable files are written.
+	SSTDir string
+
+	// MemTableMaxSize is the byte threshold at which a MemTable is frozen
+	// and queued for flushing. Default: 64MB.
+	MemTableMaxSize int64
+
+	// CommitWindow is the group-committer batch window. Default: 4ms.
+	CommitWindow time.Duration
+
+	// WALConfig is passed directly to wal.OpenWAL.
+	WALConfig wal.WALConfig
+}
+
+// DefaultEngineConfig returns a production-ready config.
+func DefaultEngineConfig() EngineConfig {
+	return EngineConfig{
+		WALPath:         "./data/wal/zenith.wal",
+		SSTDir:          "./data/sst",
+		MemTableMaxSize: 64 * 1024 * 1024, // 64 MB
+		CommitWindow:    4 * time.Millisecond,
+		WALConfig: wal.WALConfig{
+			SyncMode: wal.SyncAlways,
+			Dir:      "./data/wal",
+		},
+	}
+}
+
+// Open creates or recovers a storage Engine.
+//
+// On first open with no existing WAL, a fresh MemTable and WAL are created.
+// On recovery, the WAL is replayed into a new MemTable before Open returns.
+// The caller must call Close() when done to flush buffers and sync the WAL.
+func Open(cfg EngineConfig) (*Engine, error) {
+	if err := os.MkdirAll(filepath.Dir(cfg.WALPath), 0755); err != nil {
+		return nil, fmt.Errorf("storage: create wal dir: %w", err)
+	}
+	if err := os.MkdirAll(cfg.SSTDir, 0755); err != nil {
+		return nil, fmt.Errorf("storage: create sst dir: %w", err)
+	}
+
+	walFile, records, err := wal.OpenWAL(cfg.WALPath, cfg.WALConfig)
+	if err != nil {
+		return nil, fmt.Errorf("storage: open wal: %w", err)
+	}
+
+	mt := memtable.NewMemTable(cfg.MemTableMaxSize)
+
+	// Replay WAL records into the fresh MemTable.
+	for _, r := range records {
+		if err := memtable.ApplyRecord(mt, r); err != nil {
+			slog.Warn("WAL replay: skipping bad record", "seq", r.Seq, "error", err)
+		}
+	}
+	slog.Info("WAL replayed", "records", len(records))
+
+	e := &Engine{
+		cfg:     cfg,
+		walFile: walFile,
+		active:  mt,
+		fst:     analysis.NewFSTDictionary(),
+		vocab:   make(map[string]struct{}),
+		closed:  make(chan struct{}),
+	}
+
+	e.committer = sstable.NewGroupCommitter(cfg.CommitWindow, e.nextSSTPath)
+
+	return e, nil
+}
+
+// ── Write path ────────────────────────────────────────────────────────────────
+
+// Put writes key→value to the WAL and then the active MemTable.
+// If the MemTable becomes frozen after this write, a background flush
+// is triggered automatically.
+func (e *Engine) Put(ctx context.Context, key, value []byte) error {
+	if e.isClosed() {
+		return errors.New("storage: engine is closed")
+	}
+
+	seq, err := e.walFile.Append(ctx, &wal.Record{
+		Op:    wal.OpTypePut,
+		Key:   key,
+		Value: value,
+	})
+	if err != nil {
+		return fmt.Errorf("storage: wal append: %w", err)
+	}
+	_ = seq
+
+	e.mu.Lock()
+	err = e.active.Put(key, value)
+	frozen := e.active.IsFrozen()
+	e.mu.Unlock()
+
+	if err != nil {
+		return fmt.Errorf("storage: memtable put: %w", err)
+	}
+
+	if frozen {
+		e.rotateAndFlush()
+	}
+
+	return nil
+}
+
+// Delete writes a tombstone to the WAL and MemTable.
+func (e *Engine) Delete(ctx context.Context, key []byte) error {
+	if e.isClosed() {
+		return errors.New("storage: engine is closed")
+	}
+
+	_, err := e.walFile.Append(ctx, &wal.Record{
+		Op:  wal.OpTypeDelete,
+		Key: key,
+	})
+	if err != nil {
+		return fmt.Errorf("storage: wal append: %w", err)
+	}
+
+	e.mu.Lock()
+	err = e.active.Delete(key)
+	frozen := e.active.IsFrozen()
+	e.mu.Unlock()
+
+	if err != nil {
+		return fmt.Errorf("storage: memtable delete: %w", err)
+	}
+
+	if frozen {
+		e.rotateAndFlush()
+	}
+
+	return nil
+}
+
+// AddTerms adds stemmed terms to the vocabulary and marks the FST as stale.
+// Called by index/engine.go after each document is indexed.
+// The FST is rebuilt lazily on the next flush or explicit RebuildFST() call.
+func (e *Engine) AddTerms(terms []string) {
+	e.vocabMu.Lock()
+	for _, t := range terms {
+		e.vocab[t] = struct{}{}
+	}
+	e.vocabMu.Unlock()
+}
+
+// ── Read path ─────────────────────────────────────────────────────────────────
+
+// Get returns the value for key, searching:
+//  1. active MemTable
+//  2. immutable MemTables (newest first)
+//  3. SSTables — NOT implemented here yet; returns (nil, false) if not in memory.
+//     The index/engine.go layer handles SSTable reads via Reader directly.
+func (e *Engine) Get(key []byte) ([]byte, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// 1. Active MemTable
+	if val, ok := e.active.Get(key); ok {
+		return val, true
+	}
+
+	// 2. Immutable MemTables (newest first)
+	for i := len(e.immutable) - 1; i >= 0; i-- {
+		if val, ok := e.immutable[i].Get(key); ok {
+			return val, true
+		}
+	}
+
+	return nil, false
+}
+
+// ── FST ───────────────────────────────────────────────────────────────────────
+
+// Contains returns true if term exists in the FST dictionary.
+// Returns false if the FST has not been built yet — use AddTerms + RebuildFST.
+func (e *Engine) Contains(term string) bool {
+	return e.fst.Contains(term)
+}
+
+// PrefixSearch returns up to maxResults terms beginning with prefix.
+// Returns nil if the FST is not built or no terms match.
+func (e *Engine) PrefixSearch(prefix string, maxResults int) ([]string, error) {
+	return e.fst.PrefixSearch(prefix, maxResults)
+}
+
+// RebuildFST rebuilds the FST from the current vocabulary snapshot.
+// Call this after bulk indexing or before serving prefix-search queries.
+// It is also called automatically after every SSTable flush.
+func (e *Engine) RebuildFST() error {
+	e.vocabMu.RLock()
+	terms := make([]string, 0, len(e.vocab))
+	for t := range e.vocab {
+		terms = append(terms, t)
+	}
+	e.vocabMu.RUnlock()
+
+	if err := e.fst.Build(terms); err != nil {
+		return fmt.Errorf("storage: rebuild fst: %w", err)
+	}
+
+	slog.Info("FST rebuilt", "terms", len(terms))
+	return nil
+}
+
+// ── Flush pipeline ────────────────────────────────────────────────────────────
+
+// rotateAndFlush freezes the active MemTable, creates a new one, and
+// triggers a background flush of the frozen table.
+func (e *Engine) rotateAndFlush() {
+	e.mu.Lock()
+	frozen := e.active
+	e.active = memtable.NewMemTable(e.cfg.MemTableMaxSize)
+	e.immutable = append(e.immutable, frozen)
+	e.mu.Unlock()
+
+	e.flushWg.Add(1)
+	go func() {
+		defer e.flushWg.Done()
+		if err := e.flushImmutable(frozen); err != nil {
+			slog.Error("SSTable flush failed", "error", err)
+		}
+	}()
+}
+
+// flushImmutable flushes a frozen MemTable to an SSTable via the group
+// committer, then removes it from the immutable list and rebuilds the FST.
+func (e *Engine) flushImmutable(mt *memtable.MemTable) error {
+	entries := mt.Iterator()
+	if len(entries) == 0 {
+		e.removeImmutable(mt)
+		return nil
+	}
+
+	path, err := e.committer.Submit(entries)
+	if err != nil {
+		return fmt.Errorf("storage: flush submit: %w", err)
+	}
+
+	slog.Info("SSTable written", "path", path, "entries", len(entries))
+
+	e.removeImmutable(mt)
+
+	// Rebuild FST after every flush so prefix search reflects new terms.
+	if err := e.RebuildFST(); err != nil {
+		slog.Warn("FST rebuild after flush failed", "error", err)
+	}
+
+	return nil
+}
+
+// removeImmutable removes mt from the immutable list once it has been flushed.
+func (e *Engine) removeImmutable(mt *memtable.MemTable) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i, m := range e.immutable {
+		if m == mt {
+			e.immutable = append(e.immutable[:i], e.immutable[i+1:]...)
+			return
+		}
+	}
+}
+
+// ForceFlush flushes the current active MemTable to an SSTable immediately,
+// regardless of whether it has reached maxSize. Used during graceful shutdown
+// and explicit Save() calls.
+func (e *Engine) ForceFlush() error {
+	e.mu.Lock()
+	if e.active.Size() == 0 {
+		e.mu.Unlock()
+		return nil
+	}
+	frozen := e.active
+	e.active = memtable.NewMemTable(e.cfg.MemTableMaxSize)
+	e.immutable = append(e.immutable, frozen)
+	e.mu.Unlock()
+
+	return e.flushImmutable(frozen)
+}
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+// Close gracefully shuts down the engine:
+//  1. Flushes the active MemTable to an SSTable
+//  2. Waits for all background flushes to complete
+//  3. Rebuilds the FST one final time
+//  4. Closes the WAL
+func (e *Engine) Close() error {
+	var closeErr error
+	e.closeOnce.Do(func() {
+		close(e.closed)
+
+		if err := e.ForceFlush(); err != nil {
+			slog.Error("ForceFlush on close failed", "error", err)
+			closeErr = err
+		}
+
+		e.flushWg.Wait()
+
+		if err := e.RebuildFST(); err != nil {
+			slog.Warn("Final FST rebuild failed", "error", err)
+		}
+
+		if err := e.walFile.Close(); err != nil {
+			slog.Error("WAL close failed", "error", err)
+			if closeErr == nil {
+				closeErr = err
+			}
+		}
+	})
+	return closeErr
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func (e *Engine) isClosed() bool {
+	select {
+	case <-e.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// nextSSTPath generates a unique SSTable file path.
+// Called by the GroupCommitter's pathGen function.
+func (e *Engine) nextSSTPath() string {
+	n := e.sstCounter.Add(1)
+	return filepath.Join(e.cfg.SSTDir, fmt.Sprintf("%010d.sst", n))
+}

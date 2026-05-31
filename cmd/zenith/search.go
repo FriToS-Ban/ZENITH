@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -21,37 +23,32 @@ The query goes through the full pipeline:
   1. Lexical scoring  (BM25 + edge n-grams + phonetic)
   2. Fuzzy matching   (BK-tree Levenshtein)
   3. Semantic scoring (vector cosine via embedder)
-  4. RRF fusion
-
-Results are printed to stdout, ranked by score.`,
+  4. RRF fusion`,
 
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		setupLogger()
+		query := strings.Join(args, " ")
 
-		// Join all args as the query so `zenith search hello world` works.
-		query := ""
-		for i, a := range args {
-			if i > 0 {
-				query += " "
-			}
-			query += a
-		}
+		printHeader("search", fmt.Sprintf("%q", query))
 
 		engine, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
-		// Don't save on search — read-only operation.
+		// Search is read-only — skip the save on exit.
 		_ = teardown
 
+		start := time.Now()
 		results, err := engine.Search(context.Background(), query)
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
+		elapsed := time.Since(start)
 
 		if len(results) == 0 {
-			fmt.Println("No results.")
+			fmt.Println(dim("  no results"))
+			fmt.Println()
 			return nil
 		}
 
@@ -60,10 +57,16 @@ Results are printed to stdout, ranked by score.`,
 			max = len(results)
 		}
 
-		fmt.Printf("Results for %q:\n\n", query)
+		printDivider()
 		for i, r := range results[:max] {
-			fmt.Printf("  %2d. %-60s  score=%.5f\n", i+1, r.ID, r.Score)
+			printResult(i+1, r.ID, r.Score)
 		}
+		printDivider()
+
+		printFooter(
+			fmt.Sprintf("%d result%s", max, plural(int64(max))),
+			elapsed.Round(time.Millisecond).String(),
+		)
 		return nil
 	},
 }

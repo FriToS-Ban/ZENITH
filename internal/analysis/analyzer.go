@@ -29,6 +29,23 @@ type Analyzer interface {
 	Analyze(text string) []Token
 }
 
+// FSTWirer is implemented by analyzers that accept an FSTDictionary for
+// query-time term resolution. index.Engine uses this interface to wire the
+// rebuilt FST into the analyzer after every batch of documents, enabling
+// prefix-based term resolution without importing a concrete type.
+type FSTWirer interface {
+	SetFST(fst *FSTDictionary)
+}
+
+// QueryAnalyzer extends Analyzer with a synonym-aware query path.
+// index.Engine uses this interface so that AnalyzeQuery (which expands
+// synonyms) is called at search time instead of the indexing-only Analyze.
+// StandardAnalyzer implements both FSTWirer and QueryAnalyzer.
+type QueryAnalyzer interface {
+	Analyzer
+	AnalyzeQuery(query string) []Token
+}
+
 // StandardAnalyzer is the default analysis pipeline:
 //  1. Regex tokenisation (camelCase-aware, alphanumeric)
 //  2. Lowercasing

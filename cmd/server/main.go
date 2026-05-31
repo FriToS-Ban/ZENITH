@@ -14,6 +14,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
+	storage "github.com/shramanb113/ZENITH/internal/storage"
 	"google.golang.org/grpc"
 )
 
@@ -31,6 +32,24 @@ func main() {
 
 	appConfig := config.DefaultConfig()
 
+	//  Storage engine (LSM)
+	// The storage engine owns the WAL, MemTable, SSTables, compactor, and
+	// a second FST dictionary keyed on the global term vocabulary.
+	// index.Engine.SetTermStore() wires them together: after each FST rebuild
+	// in the index layer, all vocabulary terms are forwarded here so the
+	// storage-layer FST stays in sync.
+	storageEng, err := storage.Open(storage.DefaultEngineConfig())
+	if err != nil {
+		slog.Error("Failed to open storage engine", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := storageEng.Close(); err != nil {
+			slog.Error("Storage engine close failed", "error", err)
+		}
+	}()
+
+	//  Index engine
 	tkz := analysis.NewStandardAnalyzer()
 	rawEmbedder := embedding.NewNeuralEmbedder(appConfig.NerveURL, appConfig.NerveTimeout)
 	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000)
@@ -42,12 +61,19 @@ func main() {
 	scorer := ranking.NewRRFRanker(0, 0)
 	engine := index.NewEngine(appConfig, embedder, scorer, tkz)
 
+	// Wire the storage engine as the index engine's term sink.
+	// Every time index.Engine rebuilds its FST (after Add() or Load()),
+	// the full vocabulary is forwarded to storageEng.AddTerms(), which
+	// triggers a storage-layer FST rebuild on the next SSTable flush.
+	engine.SetTermStore(storageEng)
+
 	if err := engine.Load("zenith.db"); err != nil {
 		slog.Info("No existing index found, starting fresh.")
 	} else {
 		slog.Info("Successfully loaded index from disk.")
 	}
 
+	//  gRPC server
 	grpcServer := grpc.NewServer()
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
 		Engine: engine,

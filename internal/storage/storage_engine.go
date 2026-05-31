@@ -88,6 +88,12 @@ type EngineConfig struct {
 	// CompactorConfig tunes the background leveled compactor.
 	// Dir is overridden to match SSTDir at Open time.
 	CompactorConfig compaction.CompactorConfig
+
+	// FSTPath is the on-disk path for the storage-layer FST file.
+	// When set, RebuildFST writes the FST atomically to this path and
+	// reopens it via memory mapping so the vocabulary dict stays off-heap.
+	// On Open, if the file exists it is loaded directly (fast startup).
+	FSTPath string
 }
 
 // DefaultEngineConfig returns a production-ready config.
@@ -108,6 +114,7 @@ func DefaultEngineConfig() EngineConfig {
 			MaxLevels:          7,
 			CompactionInterval: 30 * time.Second,
 		},
+		FSTPath: "./data/terms.fst",
 	}
 }
 
@@ -155,6 +162,15 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	cfg.CompactorConfig.Dir = cfg.SSTDir
 	e.compactor = compaction.NewCompactor(cfg.CompactorConfig)
 	e.compactor.Run()
+
+	// Load FST from disk for instant startup — no vocab rebuild needed.
+	// The file was written by the last RebuildFST call and reflects the
+	// vocabulary accumulated before the previous shutdown.
+	if cfg.FSTPath != "" {
+		if err := e.fst.OpenFromFile(cfg.FSTPath); err == nil {
+			slog.Info("Storage FST loaded from disk", "path", cfg.FSTPath, "terms", e.fst.Size())
+		}
+	}
 
 	return e, nil
 }
@@ -277,8 +293,9 @@ func (e *Engine) PrefixSearch(prefix string, maxResults int) ([]string, error) {
 }
 
 // RebuildFST rebuilds the FST from the current vocabulary snapshot.
-// Call this after bulk indexing or before serving prefix-search queries.
-// It is also called automatically after every SSTable flush.
+// If FSTPath is set, the FST is written atomically to disk and reopened via
+// memory mapping. Otherwise, the FST is kept in-memory.
+// Called automatically after every SSTable flush and on Close.
 func (e *Engine) RebuildFST() error {
 	e.vocabMu.RLock()
 	terms := make([]string, 0, len(e.vocab))
@@ -287,7 +304,13 @@ func (e *Engine) RebuildFST() error {
 	}
 	e.vocabMu.RUnlock()
 
-	if err := e.fst.Build(terms); err != nil {
+	var err error
+	if e.cfg.FSTPath != "" {
+		err = e.fst.BuildToFile(terms, e.cfg.FSTPath)
+	} else {
+		err = e.fst.Build(terms)
+	}
+	if err != nil {
 		return fmt.Errorf("storage: rebuild fst: %w", err)
 	}
 

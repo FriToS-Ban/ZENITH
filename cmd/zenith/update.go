@@ -107,5 +107,8 @@ func runGoInstall() error {
 	cmd := exec.Command(goPath, "install", installTarget)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Bypass the Go module proxy so the install always fetches the latest
+	// commit directly from GitHub instead of a potentially stale cached version.
+	cmd.Env = append(os.Environ(), "GOPROXY=direct", "GONOSUMDB=*")
 	return cmd.Run()
 }

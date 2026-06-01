@@ -109,6 +109,26 @@ func TestWatcher_HandleRenameEvent_CallsRemove(t *testing.T) {
 	}
 }
 
+func TestWatchMultipleRegistersAllDirs(t *testing.T) {
+	idx := &recordingIndexer{}
+	w, err := crawler.NewWatcher(idx)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so WatchMultiple returns right away
+
+	// Should not error even when dirs exist and ctx is already done.
+	if err := w.WatchMultiple(ctx, []string{dir1, dir2}); err != nil {
+		t.Fatalf("WatchMultiple: %v", err)
+	}
+}
+
 func TestWatcher_HandleRemoveEvent_UnsupportedExt_NoCall(t *testing.T) {
 	dir := t.TempDir()
 	absPath := filepath.Join(dir, "image.png")

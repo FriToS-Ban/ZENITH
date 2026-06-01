@@ -69,22 +69,25 @@ func (d *FSTDictionary) Build(terms []string) error {
 //
 // Write is atomic: the FST is first written to path+".tmp", synced, then
 // renamed over path so a crash mid-write never leaves a corrupt file.
+//
+// On Windows, os.Rename fails with "Access is denied" if the destination file
+// is still held open by a memory-map. BuildToFile therefore closes the existing
+// mmap under the write lock before renaming, keeping the window where the FST
+// is unavailable to readers as short as possible.
 func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	deduped := sortAndDedup(terms)
-
 	tmpPath := path + ".tmp"
 
+	// Write the new FST to the temp file outside the lock — this is the slow part.
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("fst: create %s: %w", tmpPath, err)
 	}
-
 	if _, err2 := buildFSTInto(f, deduped); err2 != nil {
 		f.Close()
 		os.Remove(tmpPath)
 		return err2
 	}
-
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
@@ -92,13 +95,27 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	}
 	f.Close()
 
+	// Hold the write lock for close → rename → reopen so readers never see a
+	// nil FST and the mmap handle is released before the rename (required on Windows).
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	closeFST(d.fst)
+	d.fst = nil
+	d.built = false
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("fst: rename to %s: %w", path, err)
 	}
 
-	// Reopen as mmap — now the OS owns paging.
-	return d.OpenFromFile(path)
+	newFST, err := vellum.Open(path)
+	if err != nil {
+		return fmt.Errorf("fst: open %s: %w", path, err)
+	}
+	d.fst = newFST
+	d.built = true
+	return nil
 }
 
 // OpenFromFile opens path as a memory-mapped FST, replacing any existing FST.

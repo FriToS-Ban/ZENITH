@@ -110,7 +110,7 @@ func runSetup() error {
 
 	// ── [2/4] Installing packages ─────────────────────────────────────────────
 	fmt.Printf("\n  %s  Installing packages  %s\n", dim("[2/4]"),
-		dim("(downloading ~2 GB — may take several minutes)"))
+		dim("(torch CPU + dependencies, ~600 MB — may take several minutes)"))
 	if err := nm.EnsureDeps(python); err != nil {
 		fmt.Printf("  %s  package install failed — see output above\n\n", yellow("!"))
 		return fmt.Errorf("setup [2/4] failed: %w", err)

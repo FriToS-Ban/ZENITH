@@ -180,12 +180,44 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// resolveUV returns the path to a uv binary or "" if uv cannot be obtained.
-// Priority: system PATH → cached venv uv → bootstrap via venv pip.
-// Bootstrap failure is non-fatal: caller falls back to plain pip.
-func (m *Manager) resolveUV() string {
+// findSystemUV returns the path to a system-installed uv binary.
+// It checks PATH first, then well-known installation locations on each OS
+// (e.g. ~/.local/bin/uv on Linux/macOS, %LOCALAPPDATA%\uv\bin\uv.exe on Windows)
+// so that uv is found even when the launching shell did not inherit the updated PATH.
+func findSystemUV() string {
 	if path, err := exec.LookPath("uv"); err == nil {
 		return path
+	}
+	home, _ := os.UserHomeDir()
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		candidates = []string{
+			filepath.Join(localAppData, "uv", "bin", "uv.exe"),
+			filepath.Join(home, ".local", "bin", "uv.exe"),
+			filepath.Join(home, ".cargo", "bin", "uv.exe"),
+		}
+	} else {
+		candidates = []string{
+			filepath.Join(home, ".local", "bin", "uv"),
+			filepath.Join(home, ".cargo", "bin", "uv"),
+			"/usr/local/bin/uv",
+		}
+	}
+	for _, p := range candidates {
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// resolveUV returns the path to a uv binary or "" if uv cannot be obtained.
+// Priority: system install (PATH + known locations) → cached venv uv → bootstrap via venv pip.
+// Bootstrap failure is non-fatal: caller falls back to plain pip.
+func (m *Manager) resolveUV() string {
+	if uv := findSystemUV(); uv != "" {
+		return uv
 	}
 	if p := m.venvUVPath(); fileExists(p) {
 		return p
@@ -244,11 +276,10 @@ func (m *Manager) EnsureDeps(python string) error {
 
 	venvDir := filepath.Join(m.dir, "venv")
 
-	// Create venv if missing. Prefer uv venv (faster) when system uv is present.
+	// Create venv if missing. Prefer uv venv (faster) when uv is available.
 	if _, err := os.Stat(m.venvPython()); err != nil {
-		sysUV, _ := exec.LookPath("uv")
 		var createCmd *exec.Cmd
-		if sysUV != "" {
+		if sysUV := findSystemUV(); sysUV != "" {
 			createCmd = exec.Command(sysUV, "venv", "--python", python, venvDir)
 		} else {
 			createCmd = exec.Command(python, "-m", "venv", venvDir)
@@ -261,11 +292,29 @@ func (m *Manager) EnsureDeps(python string) error {
 	req := filepath.Join(m.dir, "requirements.txt")
 	uv := m.resolveUV()
 
+	// Install torch CPU-only first. The default PyPI torch is the CUDA build (~2.6 GB);
+	// the CPU build from the PyTorch wheel index is ~260 MB and sufficient for inference.
+	// pip/uv will skip torch in the requirements.txt pass below because it is already satisfied.
+	const torchCPUIndex = "https://download.pytorch.org/whl/cpu"
+	var torchCmd *exec.Cmd
+	if uv != "" {
+		torchCmd = exec.Command(uv, "pip", "install", "--python", m.venvPython(),
+			"--index-url", torchCPUIndex, "torch>=2.3.0")
+	} else {
+		torchCmd = exec.Command(m.venvPip(), "install",
+			"--prefer-binary", "--index-url", torchCPUIndex, "torch>=2.3.0")
+	}
+	torchCmd.Stdout = os.Stderr
+	torchCmd.Stderr = os.Stderr
+	if err := torchCmd.Run(); err != nil {
+		return fmt.Errorf("torch install failed — see output above")
+	}
+
 	var installCmd *exec.Cmd
 	if uv != "" {
 		installCmd = exec.Command(uv, "pip", "install", "--python", m.venvPython(), "-r", req)
 	} else {
-		installCmd = exec.Command(m.venvPip(), "install", "-r", req)
+		installCmd = exec.Command(m.venvPip(), "install", "--prefer-binary", "-r", req)
 	}
 	installCmd.Stdout = os.Stderr
 	installCmd.Stderr = os.Stderr

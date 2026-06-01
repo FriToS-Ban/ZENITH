@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/nervemanager"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
+	"github.com/shramanb113/ZENITH/internal/storage/wal"
 )
 
 // cliFlags holds the flag values shared across all commands.
@@ -30,6 +32,26 @@ var cliFlags struct {
 	ollamaURL   string
 	ollamaModel string
 	nerveURL    string
+}
+
+// defaultStorageConfig returns a storage config rooted at ~/.zenith/ so WAL,
+// SSTable, and FST files land in a consistent location regardless of the
+// working directory from which zenith is invoked.
+func defaultStorageConfig() storage.EngineConfig {
+	cfg := storage.DefaultEngineConfig()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return cfg
+	}
+	base := filepath.Join(home, ".zenith")
+	cfg.WALPath = filepath.Join(base, "data", "wal", "zenith.wal")
+	cfg.WALConfig = wal.WALConfig{
+		SyncMode: wal.SyncAlways,
+		Dir:      filepath.Join(base, "data", "wal"),
+	}
+	cfg.SSTDir = filepath.Join(base, "data", "sst")
+	cfg.FSTPath = filepath.Join(base, "data", "terms.fst")
+	return cfg
 }
 
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
@@ -53,7 +75,7 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		storageEng, storageErr = storage.Open(storage.DefaultEngineConfig())
+		storageEng, storageErr = storage.Open(defaultStorageConfig())
 	}()
 	go func() {
 		defer wg.Done()

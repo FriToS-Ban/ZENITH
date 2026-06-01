@@ -38,9 +38,25 @@ go build -o zenith ./cmd/zenith
 
 ---
 
+> [!WARNING]
+> **`zenith setup` must be run before anything else.**
+>
+> It installs the Python embedding packages (~2 GB) and downloads the model weights (~1.6 GB).
+> `zenith index`, `zenith search`, `zenith watch`, and `zenith serve` are all hard-blocked
+> until setup completes.
+>
+> ```bash
+> zenith setup
+> ```
+>
+> This takes several minutes on first run. Subsequent starts are instant.
+
 ## Quick Start
 
 ```bash
+# First-time setup (required once)
+zenith setup
+
 # Index a directory
 zenith index ~/Documents
 
@@ -85,7 +101,7 @@ The first run auto-starts the nerve embedding service in the background if Pytho
 | Persistent watchlist (`~/.zenith/watchlist.json`)    | Active          |                                      |
 | Boot auto-start (Windows / Linux / macOS)            | Active          |                                      |
 | `.txt` `.md` `.go` `.html` extractors                | Active          |                                      |
-| PDF extraction                                       | Not implemented | Planned                              |
+| PDF extraction                                       | Active          |                                      |
 | OpenAI embedder                                      | Not implemented | Planned                              |
 | Prometheus metrics                                   | Not implemented | Phase 6                              |
 | OpenTelemetry traces                                 | Not implemented | Phase 6                              |
@@ -303,6 +319,7 @@ zenith index --fst ./data/custom.fst ~/Documents
 ```
 
 **Flags:**
+
 ```
 --db           string   Index database file            (default: zenith.db)
 --fst          string   On-disk FST path               (default: ./data/index.fst)
@@ -342,6 +359,7 @@ zenith search "kubernets deployement"
 ```
 
 **Flags:**
+
 ```
 -n, --max int   Maximum results to display             (default: 10)
 --db            string   Index database file           (default: zenith.db)
@@ -404,6 +422,7 @@ zenith watch run --embedder ollama ~/Documents
 ```
 
 **Flags for `watch run`:**
+
 ```
 --index-first   Bulk-index directory before starting the watcher
 --db            string   Index database file           (default: zenith.db)
@@ -444,6 +463,7 @@ zenith log -n 20 --type SEARCH
 ```
 
 **Flags:**
+
 ```
 -n, --lines int    Number of lines to show             (default: 50)
 -f, --follow       Stream new events live (Ctrl-C to stop)

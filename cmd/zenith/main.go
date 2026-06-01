@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -25,11 +26,27 @@ Hybrid ranking:
   Fusion   Reciprocal Rank Fusion (RRF)`,
 }
 
-func main() {
-	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd)
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func init() {
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		switch cmd.CommandPath() {
+		case "zenith setup", "zenith version", "zenith update":
+			return nil
+		}
+		return checkSetupDone()
 	}
+}
+
+func main() {
+	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd, setupCmd)
+
+	err := rootCmd.Execute()
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, errSetupRequired) {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	os.Exit(1)
 }

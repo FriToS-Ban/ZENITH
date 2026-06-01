@@ -59,7 +59,7 @@ func TestManager_extract(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{dir: dir}
 
-	if err := m.extract(); err != nil {
+	if err := m.Extract(); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
 
@@ -91,10 +91,10 @@ func TestManager_extract(t *testing.T) {
 func TestManager_extract_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{dir: dir}
-	if err := m.extract(); err != nil {
+	if err := m.Extract(); err != nil {
 		t.Fatalf("first extract: %v", err)
 	}
-	if err := m.extract(); err != nil {
+	if err := m.Extract(); err != nil {
 		t.Fatalf("second extract: %v", err)
 	}
 }
@@ -126,7 +126,7 @@ func TestManager_VenvPaths_Consistent(t *testing.T) {
 
 func TestManager_findPython(t *testing.T) {
 	m := &Manager{}
-	path, err := m.findPython()
+	path, err := m.FindPython()
 	if err != nil {
 		t.Skipf("python3 not available on this machine: %v", err)
 	}
@@ -203,6 +203,26 @@ func TestManager_VenvSentinel_InvalidatedByRequirementsChange(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("grpcio>=1.70.0\n"), 0o644)
 	if m.venvIsValid() {
 		t.Error("venvIsValid should return false after requirements.txt changes")
+	}
+}
+
+// ─── RequirementsHash ─────────────────────────────────────────────────────────
+
+func TestManager_RequirementsHash_NonEmpty(t *testing.T) {
+	m := New()
+	h := m.RequirementsHash()
+	if len(h) != 64 {
+		t.Errorf("RequirementsHash should be 64 hex chars (SHA-256), got %d: %q", len(h), h)
+	}
+}
+
+func TestManager_RequirementsHash_Stable(t *testing.T) {
+	// Two independent Manager instances must produce the same hash — the value
+	// is derived from the embedded bytes, not from instance state.
+	h1 := (&Manager{dir: t.TempDir(), port: 19990}).RequirementsHash()
+	h2 := (&Manager{dir: t.TempDir(), port: 19991}).RequirementsHash()
+	if h1 != h2 {
+		t.Errorf("RequirementsHash must be independent of Manager state: %q != %q", h1, h2)
 	}
 }
 

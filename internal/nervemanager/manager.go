@@ -68,35 +68,44 @@ func (m *Manager) Addr() string {
 func (m *Manager) Start(ctx context.Context) (addr string, s Status) {
 	addr = m.Addr()
 
-	// Fast path: already running.
 	if m.ping() {
 		return addr, StatusReady
 	}
 
-	if err := m.extract(); err != nil {
+	if err := m.Extract(); err != nil {
 		return "", StatusLaunchFailed
 	}
 
-	python, err := m.findPython()
+	python, err := m.FindPython()
 	if err != nil {
 		return "", StatusNoPython
 	}
 
-	if err := m.ensureDeps(python); err != nil {
+	if err := m.EnsureDeps(python); err != nil {
 		return "", StatusDepsFailed
 	}
 
-	if err := m.launch(); err != nil {
+	if err := m.Launch(); err != nil {
 		return "", StatusLaunchFailed
 	}
 
-	// The gRPC server binds to its port within a second — models load lazily
-	// on first request, so 20s is ample even on a fresh install.
-	if !m.waitReady(ctx, 20*time.Second) {
+	if !m.WaitReady(context.Background(), 20*time.Second) {
 		return "", StatusTimeout
 	}
 
 	return addr, StatusReady
+}
+
+// RequirementsHash returns the SHA-256 hex of the embedded requirements.txt.
+// Used by the setup sentinel to detect when deps have changed after an update.
+func (m *Manager) RequirementsHash() string {
+	return fmt.Sprintf("%x", sha256.Sum256(embeddedReqs))
+}
+
+// ResetSetup deletes the venv_ok sentinel so EnsureDeps will reinstall packages
+// on the next call. Called by 'zenith setup --force'.
+func (m *Manager) ResetSetup() {
+	_ = os.Remove(m.venvOKPath())
 }
 
 // ─── private ─────────────────────────────────────────────────────────────────
@@ -111,7 +120,8 @@ func (m *Manager) ping() bool {
 	return true
 }
 
-func (m *Manager) extract() error {
+// Extract writes the embedded nerve Python assets to the manager's working directory.
+func (m *Manager) Extract() error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
@@ -129,7 +139,8 @@ func (m *Manager) extract() error {
 	return nil
 }
 
-func (m *Manager) findPython() (string, error) {
+// FindPython locates a Python 3 interpreter in PATH and returns its absolute path.
+func (m *Manager) FindPython() (string, error) {
 	for _, c := range []string{"python3", "python"} {
 		path, err := exec.LookPath(c)
 		if err != nil {
@@ -155,6 +166,43 @@ func (m *Manager) venvPip() string {
 		return filepath.Join(m.dir, "venv", "Scripts", "pip.exe")
 	}
 	return filepath.Join(m.dir, "venv", "bin", "pip")
+}
+
+func (m *Manager) venvUVPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(m.dir, "venv", "Scripts", "uv.exe")
+	}
+	return filepath.Join(m.dir, "venv", "bin", "uv")
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// resolveUV returns the path to a uv binary or "" if uv cannot be obtained.
+// Priority: system PATH → cached venv uv → bootstrap via venv pip.
+// Bootstrap failure is non-fatal: caller falls back to plain pip.
+func (m *Manager) resolveUV() string {
+	if path, err := exec.LookPath("uv"); err == nil {
+		return path
+	}
+	if p := m.venvUVPath(); fileExists(p) {
+		return p
+	}
+	// Bootstrap: install uv (~1 MB) into the venv so it can pull the heavy
+	// packages (torch, sentence-transformers) in parallel.
+	fmt.Fprintln(os.Stderr, "  nerve  bootstrapping uv package manager...")
+	boot := exec.Command(m.venvPip(), "install", "--quiet", "uv")
+	boot.Stdout = os.Stderr
+	boot.Stderr = os.Stderr
+	if err := boot.Run(); err != nil {
+		return ""
+	}
+	if p := m.venvUVPath(); fileExists(p) {
+		return p
+	}
+	return ""
 }
 
 // venvOKPath is the sentinel file that caches successful dep installs.
@@ -188,26 +236,40 @@ func (m *Manager) markVenvOK() {
 	_ = os.WriteFile(m.venvOKPath(), []byte(hash), 0o644)
 }
 
-func (m *Manager) ensureDeps(python string) error {
-	// Improvement 2: fast path — skip Python subprocess if deps are cached.
+// EnsureDeps creates the Python venv if absent and installs requirements.txt into it.
+func (m *Manager) EnsureDeps(python string) error {
 	if m.venvIsValid() {
 		return nil
 	}
 
 	venvDir := filepath.Join(m.dir, "venv")
+
+	// Create venv if missing. Prefer uv venv (faster) when system uv is present.
 	if _, err := os.Stat(m.venvPython()); err != nil {
-		// Venv missing — create it.
-		if out, err := exec.Command(python, "-m", "venv", venvDir).CombinedOutput(); err != nil {
+		sysUV, _ := exec.LookPath("uv")
+		var createCmd *exec.Cmd
+		if sysUV != "" {
+			createCmd = exec.Command(sysUV, "venv", "--python", python, venvDir)
+		} else {
+			createCmd = exec.Command(python, "-m", "venv", venvDir)
+		}
+		if out, err := createCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("venv: %w — %s", err, out)
 		}
 	}
 
-	// Improvement 1: stream pip output to stderr so users see progress.
 	req := filepath.Join(m.dir, "requirements.txt")
-	cmd := exec.Command(m.venvPip(), "install", "-r", req)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	uv := m.resolveUV()
+
+	var installCmd *exec.Cmd
+	if uv != "" {
+		installCmd = exec.Command(uv, "pip", "install", "--python", m.venvPython(), "-r", req)
+	} else {
+		installCmd = exec.Command(m.venvPip(), "install", "-r", req)
+	}
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
 		return fmt.Errorf("pip install failed — see output above")
 	}
 
@@ -215,7 +277,8 @@ func (m *Manager) ensureDeps(python string) error {
 	return nil
 }
 
-func (m *Manager) launch() error {
+// Launch starts the nerve gRPC sidecar as a detached background process.
+func (m *Manager) Launch() error {
 	logPath := filepath.Join(m.dir, "nerve.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -230,10 +293,9 @@ func (m *Manager) launch() error {
 	return cmd.Start()
 }
 
-// waitReady polls until the nerve gRPC port accepts connections or the deadline passes.
-// Improvement 5: exponential backoff (10ms → 500ms) reduces latency on fast machines
-// where nerve is already running or starts quickly.
-func (m *Manager) waitReady(ctx context.Context, timeout time.Duration) bool {
+// WaitReady polls until the nerve gRPC port accepts connections or timeout elapses.
+// Uses exponential backoff (10ms → 500ms cap). ctx cancellation exits early.
+func (m *Manager) WaitReady(ctx context.Context, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	delay := 10 * time.Millisecond
 	const maxDelay = 500 * time.Millisecond

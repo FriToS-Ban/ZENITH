@@ -24,8 +24,7 @@ type Config struct {
 	WALSyncInterval  time.Duration
 
 	// Nerve
-	NerveURL     string
-	NerveTimeout time.Duration
+	NerveGRPCAddr string
 }
 
 func DefaultConfig() *Config {
@@ -40,8 +39,7 @@ func DefaultConfig() *Config {
 		EmbeddingWorkers: 4,
 		CompactionInterv: 30 * time.Second,
 		WALSyncInterval:  100 * time.Millisecond,
-		NerveURL:         "http://localhost:8000",
-		NerveTimeout:     5 * time.Second,
+		NerveGRPCAddr: "localhost:8000",
 		PhoneticWeight:   0.3,
 		VectorWeight:     0.7,
 		NeuralWeight:     1.0,

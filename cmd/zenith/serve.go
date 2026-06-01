@@ -35,10 +35,11 @@ and saves it on graceful shutdown (SIGINT / SIGTERM).`,
 
 		printHeader("serve", ":"+serveFlags.port)
 
-		engine, teardown, err := buildEngine(true)
+		engine, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
+		_ = alog
 
 		grpcServer := grpc.NewServer()
 		zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{Engine: engine})

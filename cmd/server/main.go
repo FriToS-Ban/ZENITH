@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -8,10 +9,13 @@ import (
 	"syscall"
 
 	"github.com/shramanb113/ZENITH/gen/go/zenithproto"
+	"github.com/shramanb113/ZENITH/internal/activitylog"
 	"github.com/shramanb113/ZENITH/internal/analysis"
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/index"
+	"github.com/shramanb113/ZENITH/internal/nerve"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
@@ -33,11 +37,6 @@ func main() {
 	appConfig := config.DefaultConfig()
 
 	//  Storage engine (LSM)
-	// The storage engine owns the WAL, MemTable, SSTables, compactor, and
-	// a second FST dictionary keyed on the global term vocabulary.
-	// index.Engine.SetTermStore() wires them together: after each FST rebuild
-	// in the index layer, all vocabulary terms are forwarded here so the
-	// storage-layer FST stays in sync.
 	storageEng, err := storage.Open(storage.DefaultEngineConfig())
 	if err != nil {
 		slog.Error("Failed to open storage engine", "error", err)
@@ -49,9 +48,25 @@ func main() {
 		}
 	}()
 
+	alog := activitylog.Open()
+	defer alog.Close()
+
+	//  Nerve gRPC sidecar
+	nerveClient, err := nerve.NewNerveClient(appConfig.NerveGRPCAddr)
+	if err != nil {
+		slog.Error("Failed to connect to Nerve sidecar", "addr", appConfig.NerveGRPCAddr, "error", err)
+		os.Exit(1)
+	}
+	alog.Log("NERVE", fmt.Sprintf("ready (%s)", appConfig.NerveGRPCAddr))
+	defer func() {
+		if err := nerveClient.Close(); err != nil {
+			slog.Error("Nerve client close failed", "error", err)
+		}
+	}()
+
 	//  Index engine
 	tkz := analysis.NewStandardAnalyzer()
-	rawEmbedder := embedding.NewNeuralEmbedder(appConfig.NerveURL, appConfig.NerveTimeout)
+	rawEmbedder := nerveClient.Embedder()
 	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000)
 	if err != nil {
 		slog.Error("Failed to create embedding cache", "error", err)
@@ -61,25 +76,25 @@ func main() {
 	scorer := ranking.NewRRFRanker(0, 0)
 	engine := index.NewEngine(appConfig, embedder, scorer, tkz)
 
-	// Keep the index-layer FST on disk (memory-mapped, not held in RAM).
 	engine.SetFSTPath("./data/index.fst")
-
-	// Wire the storage engine as the index engine's term sink.
-	// Every time index.Engine rebuilds its FST (after Add() or Load()),
-	// the full vocabulary is forwarded to storageEng.AddTerms(), which
-	// triggers a storage-layer FST rebuild on the next SSTable flush.
 	engine.SetTermStore(storageEng)
 
 	if err := engine.Load("zenith.db"); err != nil {
 		slog.Info("No existing index found, starting fresh.")
 	} else {
 		slog.Info("Successfully loaded index from disk.")
+		alog.Log("LOADED", "zenith.db")
 	}
+
+	//  PDF indexer
+	pdfIndexer := pdf.NewIndexer(nerveClient, engine, alog)
 
 	//  gRPC server
 	grpcServer := grpc.NewServer()
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
-		Engine: engine,
+		Engine:     engine,
+		PDFIndexer: pdfIndexer,
+		Logger:     alog,
 	})
 
 	stop := make(chan os.Signal, 1)
@@ -100,5 +115,6 @@ func main() {
 		slog.Error("Failed to save index", "error", err)
 	} else {
 		slog.Info("Index saved. Goodbye.")
+		alog.Log("SAVED", "zenith.db")
 	}
 }

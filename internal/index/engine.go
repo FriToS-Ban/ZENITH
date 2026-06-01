@@ -163,14 +163,67 @@ func (e *Engine) FSTPrefixSearch(prefix string, maxResults int) ([]string, error
 // After each successful index, the FST is rebuilt if new terms were added,
 // keeping query-time prefix resolution and the optional TermStore current.
 func (e *Engine) Add(ctx context.Context, originalID string, fullText string) error {
-	if err := e.add(ctx, originalID, fullText); err != nil {
+	if err := e.addInternal(ctx, originalID, fullText, nil); err != nil {
 		return err
 	}
 	e.rebuildFSTIfNeeded()
 	return nil
 }
 
-func (e *Engine) add(ctx context.Context, originalID string, fullText string) error {
+// AddWithVector indexes a document using a pre-computed document embedding,
+// skipping the embedder.Embed call. Word-level embeddings are still computed.
+// Use when the caller already has a vector (e.g. from the PDF sidecar).
+func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText string, docVec []float32) error {
+	if err := e.addInternal(ctx, originalID, fullText, docVec); err != nil {
+		return err
+	}
+	e.rebuildFSTIfNeeded()
+	return nil
+}
+
+// Remove deletes all index entries for originalID.
+// Returns nil if the ID was never indexed (idempotent).
+func (e *Engine) Remove(_ context.Context, originalID string) error {
+	h := fnv.New32a()
+	h.Write([]byte(originalID))
+	internalID := uint32(h.Sum32())
+
+	e.inverted.Lock()
+	e.vectors.Lock()
+	e.phonetics.Lock()
+	defer e.inverted.Unlock()
+	defer e.vectors.Unlock()
+	defer e.phonetics.Unlock()
+
+	idxData := e.inverted.GetData()
+	idxPhon := e.phonetics.GetData()
+	idxFrags := e.inverted.GetDocFragments()
+	docVecStore := e.vectors.GetVectors()
+
+	oldFrags, exists := idxFrags[internalID]
+	if !exists {
+		return nil
+	}
+
+	for _, frag := range oldFrags {
+		if idList, ok := idxData[frag]; ok {
+			idxData[frag] = removeID(idList, internalID)
+		}
+		if idList, ok := idxPhon[frag]; ok {
+			idxPhon[frag] = removeID(idList, internalID)
+		}
+	}
+	delete(idxFrags, internalID)
+	delete(docVecStore, internalID)
+	delete(e.idMapping, internalID)
+
+	e.bm25.Remove(internalID)
+	e.tfidf.Remove(internalID)
+
+	return nil
+}
+
+func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32) error {
 	logger := slog.With("doc_id", originalID)
 
 	tokens := e.analyzer.Analyze(fullText)
@@ -180,9 +233,15 @@ func (e *Engine) add(ctx context.Context, originalID string, fullText string) er
 	}
 
 	// Embeddings — failures are non-fatal; falls back to lexical-only.
-	docVec, err := e.embedder.Embed(ctx, fullText)
-	if err != nil {
-		logger.Warn("Embedding failed, indexing purely lexically", "error", err)
+	var docVec []float32
+	if preVec != nil {
+		docVec = preVec
+	} else {
+		var err error
+		docVec, err = e.embedder.Embed(ctx, fullText)
+		if err != nil {
+			logger.Warn("Embedding failed, indexing purely lexically", "error", err)
+		}
 	}
 
 	tempWordVectors := make(map[string]VectorEntry)

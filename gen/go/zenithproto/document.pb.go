@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.33.4
-// source: internal/proto/document.proto
+// source: document.proto
 
 package zenithproto
 
@@ -31,7 +31,7 @@ type IndexRequest struct {
 
 func (x *IndexRequest) Reset() {
 	*x = IndexRequest{}
-	mi := &file_internal_proto_document_proto_msgTypes[0]
+	mi := &file_document_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -43,7 +43,7 @@ func (x *IndexRequest) String() string {
 func (*IndexRequest) ProtoMessage() {}
 
 func (x *IndexRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[0]
+	mi := &file_document_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -56,7 +56,7 @@ func (x *IndexRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexRequest.ProtoReflect.Descriptor instead.
 func (*IndexRequest) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{0}
+	return file_document_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *IndexRequest) GetId() string {
@@ -83,7 +83,7 @@ type IndexResponse struct {
 
 func (x *IndexResponse) Reset() {
 	*x = IndexResponse{}
-	mi := &file_internal_proto_document_proto_msgTypes[1]
+	mi := &file_document_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -95,7 +95,7 @@ func (x *IndexResponse) String() string {
 func (*IndexResponse) ProtoMessage() {}
 
 func (x *IndexResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[1]
+	mi := &file_document_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -108,7 +108,7 @@ func (x *IndexResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexResponse.ProtoReflect.Descriptor instead.
 func (*IndexResponse) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{1}
+	return file_document_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *IndexResponse) GetStatus() bool {
@@ -134,7 +134,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_internal_proto_document_proto_msgTypes[2]
+	mi := &file_document_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -146,7 +146,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[2]
+	mi := &file_document_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -159,7 +159,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{2}
+	return file_document_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *SearchRequest) GetQuery() string {
@@ -173,13 +173,14 @@ type SearchResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Score         float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`
+	Fields        map[string]string      `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_internal_proto_document_proto_msgTypes[3]
+	mi := &file_document_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -191,7 +192,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[3]
+	mi := &file_document_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -204,7 +205,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{3}
+	return file_document_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SearchResult) GetId() string {
@@ -221,6 +222,13 @@ func (x *SearchResult) GetScore() float64 {
 	return 0
 }
 
+func (x *SearchResult) GetFields() map[string]string {
+	if x != nil {
+		return x.Fields
+	}
+	return nil
+}
+
 type SearchResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Results       []*SearchResult        `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
@@ -230,7 +238,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_internal_proto_document_proto_msgTypes[4]
+	mi := &file_document_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -242,7 +250,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[4]
+	mi := &file_document_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -255,7 +263,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{4}
+	return file_document_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -279,7 +287,7 @@ type DocumentProto struct {
 
 func (x *DocumentProto) Reset() {
 	*x = DocumentProto{}
-	mi := &file_internal_proto_document_proto_msgTypes[5]
+	mi := &file_document_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -291,7 +299,7 @@ func (x *DocumentProto) String() string {
 func (*DocumentProto) ProtoMessage() {}
 
 func (x *DocumentProto) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[5]
+	mi := &file_document_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -304,7 +312,7 @@ func (x *DocumentProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentProto.ProtoReflect.Descriptor instead.
 func (*DocumentProto) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{5}
+	return file_document_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DocumentProto) GetId() string {
@@ -358,7 +366,7 @@ type Vector struct {
 
 func (x *Vector) Reset() {
 	*x = Vector{}
-	mi := &file_internal_proto_document_proto_msgTypes[6]
+	mi := &file_document_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +378,7 @@ func (x *Vector) String() string {
 func (*Vector) ProtoMessage() {}
 
 func (x *Vector) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_document_proto_msgTypes[6]
+	mi := &file_document_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +391,7 @@ func (x *Vector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vector.ProtoReflect.Descriptor instead.
 func (*Vector) Descriptor() ([]byte, []int) {
-	return file_internal_proto_document_proto_rawDescGZIP(), []int{6}
+	return file_document_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Vector) GetElements() []float32 {
@@ -393,11 +401,123 @@ func (x *Vector) GetElements() []float32 {
 	return nil
 }
 
-var File_internal_proto_document_proto protoreflect.FileDescriptor
+type IndexPDFRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId    string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
 
-const file_internal_proto_document_proto_rawDesc = "" +
+func (x *IndexPDFRequest) Reset() {
+	*x = IndexPDFRequest{}
+	mi := &file_document_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IndexPDFRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IndexPDFRequest) ProtoMessage() {}
+
+func (x *IndexPDFRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IndexPDFRequest.ProtoReflect.Descriptor instead.
+func (*IndexPDFRequest) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *IndexPDFRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *IndexPDFRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+type IndexPDFResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        bool                   `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	ChunksIndexed int32                  `protobuf:"varint,3,opt,name=chunks_indexed,json=chunksIndexed,proto3" json:"chunks_indexed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IndexPDFResponse) Reset() {
+	*x = IndexPDFResponse{}
+	mi := &file_document_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IndexPDFResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IndexPDFResponse) ProtoMessage() {}
+
+func (x *IndexPDFResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_document_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IndexPDFResponse.ProtoReflect.Descriptor instead.
+func (*IndexPDFResponse) Descriptor() ([]byte, []int) {
+	return file_document_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *IndexPDFResponse) GetStatus() bool {
+	if x != nil {
+		return x.Status
+	}
+	return false
+}
+
+func (x *IndexPDFResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *IndexPDFResponse) GetChunksIndexed() int32 {
+	if x != nil {
+		return x.ChunksIndexed
+	}
+	return 0
+}
+
+var File_document_proto protoreflect.FileDescriptor
+
+const file_document_proto_rawDesc = "" +
 	"\n" +
-	"\x1dinternal/proto/document.proto\x12\x06zenith\"2\n" +
+	"\x0edocument.proto\x12\x06zenith\"2\n" +
 	"\fIndexRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\tR\x04data\"A\n" +
@@ -405,10 +525,14 @@ const file_internal_proto_document_proto_rawDesc = "" +
 	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"%\n" +
 	"\rSearchRequest\x12\x14\n" +
-	"\x05query\x18\x01 \x01(\tR\x05query\"4\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\"\xa9\x01\n" +
 	"\fSearchResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x05score\x18\x02 \x01(\x01R\x05score\"@\n" +
+	"\x05score\x18\x02 \x01(\x01R\x05score\x128\n" +
+	"\x06fields\x18\x03 \x03(\v2 .zenith.SearchResult.FieldsEntryR\x06fields\x1a9\n" +
+	"\vFieldsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
 	"\x0eSearchResponse\x12.\n" +
 	"\aresults\x18\x01 \x03(\v2\x14.zenith.SearchResultR\aresults\"\xed\x02\n" +
 	"\rDocumentProto\x12\x0e\n" +
@@ -425,71 +549,86 @@ const file_internal_proto_document_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12$\n" +
 	"\x05value\x18\x02 \x01(\v2\x0e.zenith.VectorR\x05value:\x028\x01\"$\n" +
 	"\x06Vector\x12\x1a\n" +
-	"\belements\x18\x01 \x03(\x02R\belements2\x87\x01\n" +
+	"\belements\x18\x01 \x03(\x02R\belements\"O\n" +
+	"\x0fIndexPDFRequest\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12\x1b\n" +
+	"\tfile_path\x18\x02 \x01(\tR\bfilePath\"k\n" +
+	"\x10IndexPDFResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\bR\x06status\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12%\n" +
+	"\x0echunks_indexed\x18\x03 \x01(\x05R\rchunksIndexed2\xc6\x01\n" +
 	"\rSearchService\x12=\n" +
 	"\x0eIndexDocuments\x12\x14.zenith.IndexRequest\x1a\x15.zenith.IndexResponse\x127\n" +
-	"\x06Search\x12\x15.zenith.SearchRequest\x1a\x16.zenith.SearchResponseB\x14Z\x12gen/go/zenithprotob\x06proto3"
+	"\x06Search\x12\x15.zenith.SearchRequest\x1a\x16.zenith.SearchResponse\x12=\n" +
+	"\bIndexPDF\x12\x17.zenith.IndexPDFRequest\x1a\x18.zenith.IndexPDFResponseB\x14Z\x12gen/go/zenithprotob\x06proto3"
 
 var (
-	file_internal_proto_document_proto_rawDescOnce sync.Once
-	file_internal_proto_document_proto_rawDescData []byte
+	file_document_proto_rawDescOnce sync.Once
+	file_document_proto_rawDescData []byte
 )
 
-func file_internal_proto_document_proto_rawDescGZIP() []byte {
-	file_internal_proto_document_proto_rawDescOnce.Do(func() {
-		file_internal_proto_document_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_proto_document_proto_rawDesc), len(file_internal_proto_document_proto_rawDesc)))
+func file_document_proto_rawDescGZIP() []byte {
+	file_document_proto_rawDescOnce.Do(func() {
+		file_document_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)))
 	})
-	return file_internal_proto_document_proto_rawDescData
+	return file_document_proto_rawDescData
 }
 
-var file_internal_proto_document_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
-var file_internal_proto_document_proto_goTypes = []any{
-	(*IndexRequest)(nil),   // 0: zenith.IndexRequest
-	(*IndexResponse)(nil),  // 1: zenith.IndexResponse
-	(*SearchRequest)(nil),  // 2: zenith.SearchRequest
-	(*SearchResult)(nil),   // 3: zenith.SearchResult
-	(*SearchResponse)(nil), // 4: zenith.SearchResponse
-	(*DocumentProto)(nil),  // 5: zenith.DocumentProto
-	(*Vector)(nil),         // 6: zenith.Vector
-	nil,                    // 7: zenith.DocumentProto.FieldsEntry
-	nil,                    // 8: zenith.DocumentProto.VectorsEntry
+var file_document_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_document_proto_goTypes = []any{
+	(*IndexRequest)(nil),     // 0: zenith.IndexRequest
+	(*IndexResponse)(nil),    // 1: zenith.IndexResponse
+	(*SearchRequest)(nil),    // 2: zenith.SearchRequest
+	(*SearchResult)(nil),     // 3: zenith.SearchResult
+	(*SearchResponse)(nil),   // 4: zenith.SearchResponse
+	(*DocumentProto)(nil),    // 5: zenith.DocumentProto
+	(*Vector)(nil),           // 6: zenith.Vector
+	(*IndexPDFRequest)(nil),  // 7: zenith.IndexPDFRequest
+	(*IndexPDFResponse)(nil), // 8: zenith.IndexPDFResponse
+	nil,                      // 9: zenith.SearchResult.FieldsEntry
+	nil,                      // 10: zenith.DocumentProto.FieldsEntry
+	nil,                      // 11: zenith.DocumentProto.VectorsEntry
 }
-var file_internal_proto_document_proto_depIdxs = []int32{
-	3, // 0: zenith.SearchResponse.results:type_name -> zenith.SearchResult
-	7, // 1: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
-	8, // 2: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
-	6, // 3: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
-	0, // 4: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
-	2, // 5: zenith.SearchService.Search:input_type -> zenith.SearchRequest
-	1, // 6: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
-	4, // 7: zenith.SearchService.Search:output_type -> zenith.SearchResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+var file_document_proto_depIdxs = []int32{
+	9,  // 0: zenith.SearchResult.fields:type_name -> zenith.SearchResult.FieldsEntry
+	3,  // 1: zenith.SearchResponse.results:type_name -> zenith.SearchResult
+	10, // 2: zenith.DocumentProto.fields:type_name -> zenith.DocumentProto.FieldsEntry
+	11, // 3: zenith.DocumentProto.vectors:type_name -> zenith.DocumentProto.VectorsEntry
+	6,  // 4: zenith.DocumentProto.VectorsEntry.value:type_name -> zenith.Vector
+	0,  // 5: zenith.SearchService.IndexDocuments:input_type -> zenith.IndexRequest
+	2,  // 6: zenith.SearchService.Search:input_type -> zenith.SearchRequest
+	7,  // 7: zenith.SearchService.IndexPDF:input_type -> zenith.IndexPDFRequest
+	1,  // 8: zenith.SearchService.IndexDocuments:output_type -> zenith.IndexResponse
+	4,  // 9: zenith.SearchService.Search:output_type -> zenith.SearchResponse
+	8,  // 10: zenith.SearchService.IndexPDF:output_type -> zenith.IndexPDFResponse
+	8,  // [8:11] is the sub-list for method output_type
+	5,  // [5:8] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_internal_proto_document_proto_init() }
-func file_internal_proto_document_proto_init() {
-	if File_internal_proto_document_proto != nil {
+func init() { file_document_proto_init() }
+func file_document_proto_init() {
+	if File_document_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_proto_document_proto_rawDesc), len(file_internal_proto_document_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_proto_rawDesc), len(file_document_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_internal_proto_document_proto_goTypes,
-		DependencyIndexes: file_internal_proto_document_proto_depIdxs,
-		MessageInfos:      file_internal_proto_document_proto_msgTypes,
+		GoTypes:           file_document_proto_goTypes,
+		DependencyIndexes: file_document_proto_depIdxs,
+		MessageInfos:      file_document_proto_msgTypes,
 	}.Build()
-	File_internal_proto_document_proto = out.File
-	file_internal_proto_document_proto_goTypes = nil
-	file_internal_proto_document_proto_depIdxs = nil
+	File_document_proto = out.File
+	file_document_proto_goTypes = nil
+	file_document_proto_depIdxs = nil
 }

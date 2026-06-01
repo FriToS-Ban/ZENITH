@@ -32,7 +32,7 @@ The query goes through the full pipeline:
 
 		printHeader("search", fmt.Sprintf("%q", query))
 
-		engine, teardown, err := buildEngine(true)
+		engine, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
@@ -44,6 +44,7 @@ The query goes through the full pipeline:
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
+		alog.Log("SEARCH", fmt.Sprintf("%q → %d results", query, len(results)))
 		elapsed := time.Since(start)
 
 		if len(results) == 0 {

@@ -26,7 +26,7 @@ Hybrid ranking:
 }
 
 func main() {
-	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd)
+	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -316,6 +316,93 @@ func TestEngine_Save_CreatesFile(t *testing.T) {
 	}
 }
 
+// ─── AddWithVector ────────────────────────────────────────────────────────────
+
+func TestEngine_AddWithVector_UsesProvidedVector(t *testing.T) {
+	cfg := config.DefaultConfig()
+	tkz := analysis.NewStandardAnalyzer()
+	emb := embedding.NewDeterministicEmbedder(384)
+	scorer := ranking.NewRRFRanker(0, 0)
+	eng := NewEngine(cfg, emb, scorer, tkz)
+
+	preVec := make([]float32, 384)
+	for i := range preVec {
+		preVec[i] = 0.42
+	}
+
+	err := eng.AddWithVector(context.Background(), "doc1", "hello world", preVec)
+	if err != nil {
+		t.Fatalf("AddWithVector returned error: %v", err)
+	}
+
+	results, err := eng.Search(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result after AddWithVector")
+	}
+	if results[0].ID != "doc1" {
+		t.Errorf("expected result id=doc1, got %s", results[0].ID)
+	}
+}
+
+// ─── Remove ───────────────────────────────────────────────────────────────────
+
+func TestEngine_Remove_DocNotSearchable(t *testing.T) {
+	cfg := config.DefaultConfig()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(384), ranking.NewRRFRanker(0, 0), analysis.NewStandardAnalyzer())
+
+	if err := eng.Add(context.Background(), "doc1", "hello world zenith"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	results, _ := eng.Search(context.Background(), "hello")
+	if len(results) == 0 {
+		t.Fatal("expected results before Remove")
+	}
+
+	if err := eng.Remove(context.Background(), "doc1"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	results, _ = eng.Search(context.Background(), "hello")
+	for _, r := range results {
+		if r.ID == "doc1" {
+			t.Error("doc1 still appears in results after Remove")
+		}
+	}
+}
+
+func TestEngine_Remove_Idempotent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(384), ranking.NewRRFRanker(0, 0), analysis.NewStandardAnalyzer())
+
+	if err := eng.Remove(context.Background(), "never-existed"); err != nil {
+		t.Errorf("Remove of non-existent doc returned error: %v", err)
+	}
+}
+
+func TestEngine_Remove_ReAdd(t *testing.T) {
+	cfg := config.DefaultConfig()
+	eng := NewEngine(cfg, embedding.NewDeterministicEmbedder(384), ranking.NewRRFRanker(0, 0), analysis.NewStandardAnalyzer())
+
+	_ = eng.Add(context.Background(), "doc1", "hello world")
+	_ = eng.Remove(context.Background(), "doc1")
+	_ = eng.Add(context.Background(), "doc1", "hello world again")
+
+	results, _ := eng.Search(context.Background(), "hello")
+	found := false
+	for _, r := range results {
+		if r.ID == "doc1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("doc1 not found after Remove + re-Add")
+	}
+}
+
 // ─── removeID ─────────────────────────────────────────────────────────────────
 
 func TestRemoveID(t *testing.T) {

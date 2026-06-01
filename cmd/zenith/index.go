@@ -35,7 +35,7 @@ Supported formats:
 
 		printHeader("index", dir)
 
-		engine, teardown, err := buildEngine(true)
+		engine, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
@@ -45,7 +45,7 @@ Supported formats:
 		var count atomic.Int64
 		counted := &countingIndexer{inner: engine, n: &count}
 
-		w, err := crawler.NewWatcher(counted)
+		w, err := crawler.NewWatcher(counted, alog)
 		if err != nil {
 			return err
 		}
@@ -76,10 +76,8 @@ func init() {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 type countingIndexer struct {
-	inner interface {
-		Add(ctx context.Context, id, text string) error
-	}
-	n *atomic.Int64
+	inner crawler.Indexer
+	n     *atomic.Int64
 }
 
 func (c *countingIndexer) Add(ctx context.Context, id, text string) error {
@@ -88,6 +86,10 @@ func (c *countingIndexer) Add(ctx context.Context, id, text string) error {
 		c.n.Add(1)
 	}
 	return err
+}
+
+func (c *countingIndexer) Remove(ctx context.Context, id string) error {
+	return c.inner.Remove(ctx, id)
 }
 
 func plural(n int64) string {

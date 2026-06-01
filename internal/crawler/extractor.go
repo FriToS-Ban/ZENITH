@@ -40,14 +40,21 @@ func ExtractText(path string) (string, error) {
 // ErrUnsupported is returned for file types that cannot be extracted.
 var ErrUnsupported = fmt.Errorf("extractor: unsupported file type")
 
-// SupportedExt returns true if ExtractText can return content for ext.
+// SupportedExt reports whether ext is a known indexable file extension.
 // ext must include the leading dot (e.g. ".go").
+// Only extensions whose content can meaningfully be full-text-indexed are
+// accepted; binary/media formats are rejected so that Remove events for image,
+// archive, or other binary files are silently ignored by the Watcher.
 func SupportedExt(ext string) bool {
 	switch strings.ToLower(ext) {
-	case ".pdf":
-		return false
-	default:
+	case ".txt", ".md", ".log", ".csv",
+		".json", ".yaml", ".yml",
+		".go",
+		".py", ".ts", ".js", ".jsx", ".tsx", ".rs", ".java", ".c", ".cpp", ".h",
+		".html", ".htm":
 		return true
+	default:
+		return false
 	}
 }
 

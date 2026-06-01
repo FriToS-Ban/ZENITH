@@ -89,7 +89,7 @@ func (m *Manager) Start(ctx context.Context) (addr string, s Status) {
 		return "", StatusLaunchFailed
 	}
 
-	if !m.WaitReady(context.Background(), 20*time.Second) {
+	if !m.WaitReady(context.Background(), 90*time.Second) {
 		return "", StatusTimeout
 	}
 

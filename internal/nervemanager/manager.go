@@ -372,14 +372,20 @@ func (m *Manager) EnsureDeps(python string) error {
 	req := filepath.Join(m.dir, "requirements.txt")
 	uv := m.resolveUV()
 
+	// uvEnv sets VIRTUAL_ENV so uv targets the correct venv without --python.
+	// Using the env var is the canonical uv approach; --python can mis-target on
+	// some platforms and is known to silently miss packages in edge cases.
+	uvEnv := append(os.Environ(), "VIRTUAL_ENV="+venvDir)
+
 	// Install torch CPU-only first. The default PyPI torch is the CUDA build (~2.6 GB);
 	// the CPU build from the PyTorch wheel index is ~260 MB and sufficient for inference.
 	// pip/uv skips torch in the requirements.txt pass below because it is already satisfied.
 	const torchCPUIndex = "https://download.pytorch.org/whl/cpu"
 	var torchCmd *exec.Cmd
 	if uv != "" {
-		torchCmd = exec.Command(uv, "pip", "install", "--python", m.venvPython(),
+		torchCmd = exec.Command(uv, "pip", "install",
 			"--index-url", torchCPUIndex, "torch>=2.3.0")
+		torchCmd.Env = uvEnv
 	} else {
 		torchCmd = exec.Command(m.venvPip(), "install",
 			"--prefer-binary", "--index-url", torchCPUIndex, "torch>=2.3.0")
@@ -392,7 +398,8 @@ func (m *Manager) EnsureDeps(python string) error {
 
 	var installCmd *exec.Cmd
 	if uv != "" {
-		installCmd = exec.Command(uv, "pip", "install", "--python", m.venvPython(), "-r", req)
+		installCmd = exec.Command(uv, "pip", "install", "-r", req)
+		installCmd.Env = uvEnv
 	} else {
 		installCmd = exec.Command(m.venvPip(), "install", "--prefer-binary", "-r", req)
 	}

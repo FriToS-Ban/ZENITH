@@ -1,7 +1,8 @@
 // Package nervemanager embeds the nerve Python sidecar and manages its lifecycle.
 // On the first zenith invocation it extracts the Python files to ~/.zenith/nerve/,
 // creates an isolated virtualenv, installs dependencies, and starts the gRPC server
-// on port 8000. Subsequent invocations reuse the running process if it is still alive.
+// on port 8000. Subsequent invocations reuse the running process if it is still alive
+// and running the current embedded code; otherwise it kills and restarts it.
 package nervemanager
 
 import (
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -63,13 +65,23 @@ func (m *Manager) Addr() string {
 	return fmt.Sprintf("127.0.0.1:%d", m.port)
 }
 
-// Start ensures nerve is running and healthy.
-// It is safe to call concurrently — if nerve is already up it returns immediately.
+// LogPath returns the absolute path to the nerve log file.
+func (m *Manager) LogPath() string {
+	return filepath.Join(m.dir, "nerve.log")
+}
+
+// Start ensures nerve is running with the current embedded code.
+// If nerve is already up but running stale code it is killed and restarted.
 func (m *Manager) Start(ctx context.Context) (addr string, s Status) {
 	addr = m.Addr()
 
 	if m.ping() {
-		return addr, StatusReady
+		if m.NerveCodeUpToDate() {
+			return addr, StatusReady
+		}
+		// Running with stale code — kill and restart with current main.py.
+		_ = m.Kill()
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	if err := m.Extract(); err != nil {
@@ -93,24 +105,72 @@ func (m *Manager) Start(ctx context.Context) (addr string, s Status) {
 		return "", StatusTimeout
 	}
 
+	m.markNerveVersionOK()
 	return addr, StatusReady
 }
 
-// RequirementsHash returns the SHA-256 hex of the embedded requirements.txt.
-// Used by the setup sentinel to detect when deps have changed after an update.
-func (m *Manager) RequirementsHash() string {
-	return fmt.Sprintf("%x", sha256.Sum256(embeddedReqs))
+// nerveCodeHash returns a combined SHA-256 of the embedded main.py and requirements.txt.
+// It changes whenever either file is updated, triggering re-setup and nerve restart.
+func (m *Manager) nerveCodeHash() string {
+	h := sha256.New()
+	h.Write(embeddedMain)
+	h.Write(embeddedReqs)
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// ResetSetup deletes the venv_ok sentinel so EnsureDeps will reinstall packages
-// on the next call. Called by 'zenith setup --force'.
+// RequirementsHash returns the combined hash of the embedded nerve code (main.py +
+// requirements.txt). Used by the setup sentinel so changes to either file prompt
+// users to re-run 'zenith setup'.
+func (m *Manager) RequirementsHash() string {
+	return m.nerveCodeHash()
+}
+
+// NerveCodeUpToDate returns true when the nerve process that is (or was last) running
+// was started with the current embedded main.py and requirements.txt.
+func (m *Manager) NerveCodeUpToDate() bool {
+	got, err := os.ReadFile(m.nerveVersionPath())
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(got)) == m.nerveCodeHash()
+}
+
+// MarkNerveVersionOK records that nerve is now running with the current embedded code.
+// Called after a successful WaitReady so subsequent Start() calls can skip restart.
+func (m *Manager) MarkNerveVersionOK() {
+	m.markNerveVersionOK()
+}
+
+// Kill terminates a running nerve process using the saved PID file.
+// Returns nil if no PID file exists (nerve not managed by this binary).
+func (m *Manager) Kill() error {
+	data, err := os.ReadFile(m.pidPath())
+	if err != nil {
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return nil
+	}
+	_ = proc.Kill()
+	_ = os.Remove(m.pidPath())
+	return nil
+}
+
+// ResetSetup wipes all setup state: venv_ok sentinel, venv directory, and nerve
+// version marker. Called by 'zenith setup --force' to guarantee a clean slate.
 func (m *Manager) ResetSetup() {
 	_ = os.Remove(m.venvOKPath())
+	_ = os.RemoveAll(filepath.Join(m.dir, "venv"))
+	_ = os.Remove(m.nerveVersionPath())
 }
 
 // ─── private ─────────────────────────────────────────────────────────────────
 
-// ping checks whether the nerve gRPC port is accepting TCP connections.
 func (m *Manager) ping() bool {
 	conn, err := net.DialTimeout("tcp", m.Addr(), 400*time.Millisecond)
 	if err != nil {
@@ -118,6 +178,22 @@ func (m *Manager) ping() bool {
 	}
 	conn.Close()
 	return true
+}
+
+func (m *Manager) pidPath() string {
+	return filepath.Join(m.dir, "nerve.pid")
+}
+
+func (m *Manager) nerveVersionPath() string {
+	return filepath.Join(m.dir, "nerve_version")
+}
+
+func (m *Manager) markNerveVersionOK() {
+	_ = os.WriteFile(m.nerveVersionPath(), []byte(m.nerveCodeHash()), 0o644)
+}
+
+func (m *Manager) savePID(pid int) {
+	_ = os.WriteFile(m.pidPath(), []byte(strconv.Itoa(pid)), 0o644)
 }
 
 // Extract writes the embedded nerve Python assets to the manager's working directory.
@@ -181,9 +257,8 @@ func fileExists(p string) bool {
 }
 
 // findSystemUV returns the path to a system-installed uv binary.
-// It checks PATH first, then well-known installation locations on each OS
-// (e.g. ~/.local/bin/uv on Linux/macOS, %LOCALAPPDATA%\uv\bin\uv.exe on Windows)
-// so that uv is found even when the launching shell did not inherit the updated PATH.
+// Checks PATH first, then well-known install locations so uv is found even
+// when the launching shell did not inherit the updated PATH.
 func findSystemUV() string {
 	if path, err := exec.LookPath("uv"); err == nil {
 		return path
@@ -214,7 +289,6 @@ func findSystemUV() string {
 
 // resolveUV returns the path to a uv binary or "" if uv cannot be obtained.
 // Priority: system install (PATH + known locations) → cached venv uv → bootstrap via venv pip.
-// Bootstrap failure is non-fatal: caller falls back to plain pip.
 func (m *Manager) resolveUV() string {
 	if uv := findSystemUV(); uv != "" {
 		return uv
@@ -222,8 +296,6 @@ func (m *Manager) resolveUV() string {
 	if p := m.venvUVPath(); fileExists(p) {
 		return p
 	}
-	// Bootstrap: install uv (~1 MB) into the venv so it can pull the heavy
-	// packages (torch, sentence-transformers) in parallel.
 	fmt.Fprintln(os.Stderr, "  nerve  bootstrapping uv package manager...")
 	boot := exec.Command(m.venvPip(), "install", "--quiet", "uv")
 	boot.Stdout = os.Stderr
@@ -237,14 +309,17 @@ func (m *Manager) resolveUV() string {
 	return ""
 }
 
-// venvOKPath is the sentinel file that caches successful dep installs.
 func (m *Manager) venvOKPath() string {
 	return filepath.Join(m.dir, "venv_ok")
 }
 
-// venvIsValid returns true if the sentinel hash matches the current requirements.txt,
-// meaning deps are already installed and up-to-date. Skips the slow Python subprocess.
+// venvIsValid returns true when the venv binary exists on disk AND the sentinel hash
+// matches the current requirements.txt. The existence check catches venvs that were
+// deleted or quarantined by antivirus while the sentinel was still present.
 func (m *Manager) venvIsValid() bool {
+	if !fileExists(m.venvPython()) {
+		return false
+	}
 	reqData, err := os.ReadFile(filepath.Join(m.dir, "requirements.txt"))
 	if err != nil {
 		return false
@@ -257,8 +332,6 @@ func (m *Manager) venvIsValid() bool {
 	return strings.TrimSpace(string(got)) == want
 }
 
-// markVenvOK writes the SHA-256 of the current requirements.txt into the sentinel.
-// Called after a successful pip install so subsequent starts skip re-validation.
 func (m *Manager) markVenvOK() {
 	reqData, err := os.ReadFile(filepath.Join(m.dir, "requirements.txt"))
 	if err != nil {
@@ -277,7 +350,7 @@ func (m *Manager) EnsureDeps(python string) error {
 	venvDir := filepath.Join(m.dir, "venv")
 
 	// Create venv if missing. Prefer uv venv (faster) when uv is available.
-	if _, err := os.Stat(m.venvPython()); err != nil {
+	if !fileExists(m.venvPython()) {
 		var createCmd *exec.Cmd
 		if sysUV := findSystemUV(); sysUV != "" {
 			createCmd = exec.Command(sysUV, "venv", "--python", python, venvDir)
@@ -294,7 +367,7 @@ func (m *Manager) EnsureDeps(python string) error {
 
 	// Install torch CPU-only first. The default PyPI torch is the CUDA build (~2.6 GB);
 	// the CPU build from the PyTorch wheel index is ~260 MB and sufficient for inference.
-	// pip/uv will skip torch in the requirements.txt pass below because it is already satisfied.
+	// pip/uv skips torch in the requirements.txt pass below because it is already satisfied.
 	const torchCPUIndex = "https://download.pytorch.org/whl/cpu"
 	var torchCmd *exec.Cmd
 	if uv != "" {
@@ -326,12 +399,15 @@ func (m *Manager) EnsureDeps(python string) error {
 	return nil
 }
 
-// Launch starts the nerve gRPC sidecar as a detached background process.
+// Launch starts the nerve gRPC sidecar as a detached background process and saves
+// its PID so Kill() can terminate it later.
 func (m *Manager) Launch() error {
-	logPath := filepath.Join(m.dir, "nerve.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(m.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		logFile, _ = os.Open(os.DevNull)
+		logFile, err = os.Open(os.DevNull)
+		if err != nil {
+			return fmt.Errorf("nerve: could not open log or devnull: %w", err)
+		}
 	}
 
 	cmd := exec.Command(m.venvPython(), "main.py")
@@ -339,7 +415,11 @@ func (m *Manager) Launch() error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	detach(cmd)
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	m.savePID(cmd.Process.Pid)
+	return nil
 }
 
 // WaitReady polls until the nerve gRPC port accepts connections or timeout elapses.

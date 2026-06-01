@@ -3,8 +3,7 @@ package nervemanager
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,44 +11,45 @@ import (
 	"testing"
 )
 
-// ─── URL ──────────────────────────────────────────────────────────────────────
+// ─── Addr ─────────────────────────────────────────────────────────────────────
 
-func TestManager_URL(t *testing.T) {
+func TestManager_Addr(t *testing.T) {
 	m := &Manager{port: 8000}
-	want := "http://127.0.0.1:8000"
-	if got := m.URL(); got != want {
-		t.Errorf("URL() = %q, want %q", got, want)
+	want := "127.0.0.1:8000"
+	if got := m.Addr(); got != want {
+		t.Errorf("Addr() = %q, want %q", got, want)
 	}
 }
 
 // ─── ping ─────────────────────────────────────────────────────────────────────
 
 func TestManager_ping_NoServer(t *testing.T) {
-	m := &Manager{port: 19999} // nothing listening here
+	m := &Manager{port: 19999}
 	if m.ping() {
-		t.Error("ping should return false when no server is listening")
+		t.Error("ping should return false when nothing is listening")
 	}
 }
 
 func TestManager_ping_LiveServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == healthEndpoint {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	addr := srv.Listener.Addr().String()
-	var port int
-	if _, err := fmt.Sscanf(addr[strings.LastIndex(addr, ":")+1:], "%d", &port); err != nil || port == 0 {
-		t.Skipf("could not parse port from %q", addr)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	defer lis.Close()
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 
+	port := freePort(t, lis)
 	m := &Manager{port: port}
 	if !m.ping() {
-		t.Error("ping should return true when server is healthy")
+		t.Error("ping should return true when a TCP server is listening")
 	}
 }
 
@@ -63,10 +63,9 @@ func TestManager_extract(t *testing.T) {
 		t.Fatalf("extract: %v", err)
 	}
 
-	for _, name := range []string{"main.py", "requirements.txt"} {
-		path := filepath.Join(dir, name)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("expected file %q after extract: %v", path, err)
+	for _, name := range []string{"main.py", "requirements.txt", "nerve_pb2.py", "nerve_pb2_grpc.py"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected file %q after extract: %v", name, err)
 		}
 	}
 
@@ -74,15 +73,15 @@ func TestManager_extract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "/health") {
-		t.Error("extracted main.py missing /health endpoint")
+	if !strings.Contains(string(content), "grpc.aio") {
+		t.Error("extracted main.py missing grpc.aio — expected gRPC server")
 	}
 
 	reqs, err := os.ReadFile(filepath.Join(dir, "requirements.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dep := range []string{"fastapi", "uvicorn", "sentence-transformers"} {
+	for _, dep := range []string{"grpcio", "pdfplumber", "sentence-transformers"} {
 		if !strings.Contains(string(reqs), dep) {
 			t.Errorf("requirements.txt missing dependency %q", dep)
 		}
@@ -104,8 +103,7 @@ func TestManager_extract_Idempotent(t *testing.T) {
 
 func TestManager_VenvPaths_Consistent(t *testing.T) {
 	m := &Manager{dir: "/some/dir"}
-	paths := []string{m.venvPython(), m.venvPip(), m.venvUvicorn()}
-
+	paths := []string{m.venvPython(), m.venvPip()}
 	for _, p := range paths {
 		if !strings.Contains(p, "venv") {
 			t.Errorf("venv path %q missing 'venv'", p)
@@ -140,27 +138,85 @@ func TestManager_findPython(t *testing.T) {
 // ─── Start — already running ──────────────────────────────────────────────────
 
 func TestManager_Start_AlreadyRunning(t *testing.T) {
-	// Serve a fake /health endpoint, then verify Start returns StatusReady
-	// without attempting to launch anything.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == healthEndpoint {
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer srv.Close()
-
-	addr := srv.Listener.Addr().String()
-	var port int
-	if _, err := fmt.Sscanf(addr[strings.LastIndex(addr, ":")+1:], "%d", &port); err != nil || port == 0 {
-		t.Skipf("could not parse port from %q", addr)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	defer lis.Close()
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 
+	port := freePort(t, lis)
 	m := &Manager{dir: t.TempDir(), port: port}
-	url, status := m.Start(context.Background())
+	addr, status := m.Start(context.Background())
 	if status != StatusReady {
 		t.Errorf("expected StatusReady when nerve already up, got %v", status)
 	}
-	if url == "" {
-		t.Error("expected non-empty URL on StatusReady")
+	if addr == "" {
+		t.Error("expected non-empty addr on StatusReady")
 	}
+}
+
+// ─── venv sentinel (venvIsValid / markVenvOK) ────────────────────────────────
+
+func TestManager_VenvSentinel_InvalidBeforeMark(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{dir: dir}
+	// Write a fake requirements.txt
+	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("grpcio>=1.60.0\n"), 0o644)
+
+	if m.venvIsValid() {
+		t.Error("venvIsValid should return false before markVenvOK is called")
+	}
+}
+
+func TestManager_VenvSentinel_ValidAfterMark(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{dir: dir}
+	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("grpcio>=1.60.0\n"), 0o644)
+
+	m.markVenvOK()
+
+	if !m.venvIsValid() {
+		t.Error("venvIsValid should return true after markVenvOK")
+	}
+}
+
+func TestManager_VenvSentinel_InvalidatedByRequirementsChange(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{dir: dir}
+	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("grpcio>=1.60.0\n"), 0o644)
+
+	m.markVenvOK()
+	if !m.venvIsValid() {
+		t.Fatal("expected valid after mark")
+	}
+
+	// Simulate a new binary with updated requirements
+	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("grpcio>=1.70.0\n"), 0o644)
+	if m.venvIsValid() {
+		t.Error("venvIsValid should return false after requirements.txt changes")
+	}
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+func freePort(t *testing.T, lis net.Listener) int {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(lis.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port == 0 {
+		t.Fatalf("could not parse port from %q", portStr)
+	}
+	return port
 }

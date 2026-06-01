@@ -35,13 +35,13 @@ Press Ctrl-C to stop. The index is saved to disk on exit.`,
 			return fmt.Errorf("not a directory: %s", dir)
 		}
 
-		engine, teardown, err := buildEngine(true)
+		engine, alog, teardown, err := buildEngine(true)
 		if err != nil {
 			return fmt.Errorf("engine init: %w", err)
 		}
 		defer teardown()
 
-		w, err := crawler.NewWatcher(engine)
+		w, err := crawler.NewWatcher(engine, alog)
 		if err != nil {
 			return err
 		}

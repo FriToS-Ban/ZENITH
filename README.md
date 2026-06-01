@@ -10,11 +10,11 @@ The storage layer is built from scratch: a full LSM-tree pipeline (WAL → MemTa
 
 ## Requirements
 
-| Requirement | Version | Notes |
-|---|---|---|
-| Go | 1.24 or newer | The only hard requirement |
-| Python 3 | 3.8 or newer | Optional — enables nerve semantic embeddings |
-| Ollama | any | Optional — alternative to Python for semantic search |
+| Requirement | Version       | Notes                                                |
+| ----------- | ------------- | ---------------------------------------------------- |
+| Go          | 1.24 or newer | The only hard requirement                            |
+| Python 3    | 3.10 or newer | Optional — enables nerve semantic embeddings         |
+| Ollama      | any           | Optional — alternative to Python for semantic search |
 
 No other dependencies. The binary is self-contained — the nerve embedding service is baked in.
 
@@ -29,6 +29,7 @@ go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 That is the complete install. One command, any platform (Linux, macOS, Windows), no extra steps.
 
 **Build from source:**
+
 ```bash
 git clone https://github.com/shramanb113/ZENITH
 cd ZENITH
@@ -62,28 +63,28 @@ The first run auto-starts the nerve embedding service in the background if Pytho
 
 ## Feature Status
 
-| Feature | Status | Notes |
-|---|---|---|
-| CLI (`index`, `search`, `watch`, `serve`, `version`) | Active | |
-| LSM storage (WAL, MemTable, SSTable, Compaction) | Active | Ground-up implementation |
-| Bloom filter + sparse index | Active | Per-SSTable |
-| BK-tree fuzzy matching | Active | O(log n) Levenshtein |
-| BM25 + TF-IDF scoring | Active | |
-| Edge n-gram prefix search | Active | |
-| Phonetic matching (Soundex) | Active | |
-| Synonym expansion | Active | |
-| FST term dictionary | Active | Rebuilt after every flush |
-| RRF hybrid ranking | Active | |
-| Nerve auto-start (embedded in binary) | Active | Needs Python 3 |
-| Deterministic embedder | Active | Default fallback — zero dependencies |
-| Ollama embedder | Active | Needs Ollama installed |
-| gRPC server (`zenith serve`) | Active | Port 8080 default |
-| fsnotify incremental watching | Active | |
-| `.txt` `.md` `.go` `.html` extractors | Active | |
-| PDF extraction | Not implemented | Planned |
-| OpenAI embedder | Not implemented | Planned |
-| Prometheus metrics | Not implemented | Phase 6 |
-| OpenTelemetry traces | Not implemented | Phase 6 |
+| Feature                                              | Status          | Notes                                |
+| ---------------------------------------------------- | --------------- | ------------------------------------ |
+| CLI (`index`, `search`, `watch`, `serve`, `version`) | Active          |                                      |
+| LSM storage (WAL, MemTable, SSTable, Compaction)     | Active          | Ground-up implementation             |
+| Bloom filter + sparse index                          | Active          | Per-SSTable                          |
+| BK-tree fuzzy matching                               | Active          | O(log n) Levenshtein                 |
+| BM25 + TF-IDF scoring                                | Active          |                                      |
+| Edge n-gram prefix search                            | Active          |                                      |
+| Phonetic matching (Soundex)                          | Active          |                                      |
+| Synonym expansion                                    | Active          |                                      |
+| FST term dictionary                                  | Active          | Rebuilt after every flush            |
+| RRF hybrid ranking                                   | Active          |                                      |
+| Nerve auto-start (embedded in binary)                | Active          | Needs Python 3                       |
+| Deterministic embedder                               | Active          | Default fallback — zero dependencies |
+| Ollama embedder                                      | Active          | Needs Ollama installed               |
+| gRPC server (`zenith serve`)                         | Active          | Port 8080 default                    |
+| fsnotify incremental watching                        | Active          |                                      |
+| `.txt` `.md` `.go` `.html` extractors                | Active          |                                      |
+| PDF extraction                                       | Not implemented | Planned                              |
+| OpenAI embedder                                      | Not implemented | Planned                              |
+| Prometheus metrics                                   | Not implemented | Phase 6                              |
+| OpenTelemetry traces                                 | Not implemented | Phase 6                              |
 
 ---
 
@@ -205,16 +206,16 @@ zenith search <query>          │
 
 ZENITH's index is backed by a full LSM-tree — the same architecture used by RocksDB and LevelDB. Nothing is outsourced to SQLite or an embedded key-value library.
 
-| Component | Implementation | Status |
-|---|---|---|
-| Write-Ahead Log | Append-only, CRC-framed, crash-safe | Active |
-| MemTable | Skip-list, sorted, O(log n) ops | Active |
-| SSTable | Immutable block-structured sorted files | Active |
-| Group Committer | Batches concurrent flushes into one fsync | Active |
-| Leveled Compaction | Background goroutine, tombstone pruning | Active |
-| Bloom Filter | Probabilistic O(1) disk-lookup bypass | Active |
-| Sparse Index | Memory-efficient offset map per SSTable | Active |
-| FST Dictionary | Rebuilt after every flush, prefix-resolve | Active |
+| Component          | Implementation                            | Status |
+| ------------------ | ----------------------------------------- | ------ |
+| Write-Ahead Log    | Append-only, CRC-framed, crash-safe       | Active |
+| MemTable           | Skip-list, sorted, O(log n) ops           | Active |
+| SSTable            | Immutable block-structured sorted files   | Active |
+| Group Committer    | Batches concurrent flushes into one fsync | Active |
+| Leveled Compaction | Background goroutine, tombstone pruning   | Active |
+| Bloom Filter       | Probabilistic O(1) disk-lookup bypass     | Active |
+| Sparse Index       | Memory-efficient offset map per SSTable   | Active |
+| FST Dictionary     | Rebuilt after every flush, prefix-resolve | Active |
 
 ---
 
@@ -249,13 +250,13 @@ ZENITH's index is backed by a full LSM-tree — the same architecture used by Ro
 
 ## File Support
 
-| Format | Extraction |
-|---|---|
-| `.txt` `.md` `.log` `.csv` `.json` `.yaml` | Raw UTF-8 text |
-| `.go` | AST — identifiers, comments, package name |
-| `.py` `.ts` `.js` `.jsx` `.tsx` `.rs` `.java` `.c` `.cpp` | Raw source |
-| `.html` `.htm` | Tag-stripped visible text |
-| `.pdf` | Not implemented (planned) |
+| Format                                                    | Extraction                                |
+| --------------------------------------------------------- | ----------------------------------------- |
+| `.txt` `.md` `.log` `.csv` `.json` `.yaml`                | Raw UTF-8 text                            |
+| `.go`                                                     | AST — identifiers, comments, package name |
+| `.py` `.ts` `.js` `.jsx` `.tsx` `.rs` `.java` `.c` `.cpp` | Raw source                                |
+| `.html` `.htm`                                            | Tag-stripped visible text                 |
+| `.pdf`                                                    | Not implemented (planned)                 |
 
 Changed files are re-indexed automatically when using `zenith watch`.
 
@@ -372,17 +373,17 @@ serve flags:
 
 All tunable parameters are in `internal/config/config.go` (`DefaultConfig()`).
 
-| Parameter | Default | Description |
-|---|---|---|
-| `FuzzyMaxDist` | `2` | BK-tree edit distance threshold |
-| `RRFConstant` | `60.0` | RRF k value |
-| `PhoneticWeight` | `0.3` | Phonetic signal blend weight |
-| `VectorWeight` | `0.7` | Vector signal blend weight |
-| `NeuralWeight` | `1.0` | Neural signal blend weight |
-| `NerveURL` | `http://127.0.0.1:8000` | Nerve sidecar URL |
-| `NerveTimeout` | `5s` | Per-request timeout to nerve |
-| `MemTableMaxSize` | `64 MB` | SSTable flush threshold |
-| `CommitWindow` | `4 ms` | Group-committer batch window |
+| Parameter         | Default                 | Description                     |
+| ----------------- | ----------------------- | ------------------------------- |
+| `FuzzyMaxDist`    | `2`                     | BK-tree edit distance threshold |
+| `RRFConstant`     | `60.0`                  | RRF k value                     |
+| `PhoneticWeight`  | `0.3`                   | Phonetic signal blend weight    |
+| `VectorWeight`    | `0.7`                   | Vector signal blend weight      |
+| `NeuralWeight`    | `1.0`                   | Neural signal blend weight      |
+| `NerveURL`        | `http://127.0.0.1:8000` | Nerve sidecar URL               |
+| `NerveTimeout`    | `5s`                    | Per-request timeout to nerve    |
+| `MemTableMaxSize` | `64 MB`                 | SSTable flush threshold         |
+| `CommitWindow`    | `4 ms`                  | Group-committer batch window    |
 
 ---
 

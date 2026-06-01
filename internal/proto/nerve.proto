@@ -1,0 +1,37 @@
+syntax = "proto3";
+package nerve;
+option go_package = "github.com/shramanb113/ZENITH/gen/go/nervepb;nervepb";
+
+service NerveService {
+  rpc Embed(EmbedRequest)           returns (EmbedResponse);
+  rpc EmbedBatch(BatchEmbedRequest) returns (BatchEmbedResponse);
+  rpc ExtractPDF(ExtractPDFRequest) returns (ExtractPDFResponse);
+}
+
+message EmbedRequest        { string text = 1; }
+message EmbedResponse       { repeated float embedding = 1; }
+message EmbedVector         { repeated float elements = 1; }
+message BatchEmbedRequest   { repeated string texts = 1; }
+message BatchEmbedResponse  { repeated EmbedVector embeddings = 1; }
+
+message ExtractPDFRequest {
+  string file_path   = 1;
+  string document_id = 2;
+}
+
+message Chunk {
+  string text              = 1;
+  int32  page_number       = 2;
+  int32  chunk_index       = 3;
+  string source_type       = 4;
+  repeated float embedding = 5;
+  float  bbox_x            = 6;
+  float  bbox_y            = 7;
+  float  bbox_w            = 8;
+  float  bbox_h            = 9;
+}
+
+message ExtractPDFResponse {
+  repeated Chunk chunks = 1;
+  int32 total_pages     = 2;
+}

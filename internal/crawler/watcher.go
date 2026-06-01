@@ -9,12 +9,14 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/shramanb113/ZENITH/internal/activitylog"
 )
 
 // Indexer is the interface the Watcher calls when a file needs to be indexed
 // or removed. index.Engine satisfies this interface.
 type Indexer interface {
 	Add(ctx context.Context, id string, text string) error
+	Remove(ctx context.Context, id string) error
 }
 
 // Watcher walks a directory tree, indexes every supported file, then keeps
@@ -24,19 +26,28 @@ type Indexer interface {
 type Watcher struct {
 	indexer  Indexer
 	watcher  *fsnotify.Watcher
+	logger   *activitylog.Logger
 	mu       sync.Mutex
 	watching map[string]struct{}
 }
 
 // NewWatcher creates a Watcher backed by indexer.
-func NewWatcher(indexer Indexer) (*Watcher, error) {
+// An optional logger may be supplied; if omitted a no-op logger is used.
+func NewWatcher(indexer Indexer, logger ...*activitylog.Logger) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
+	var l *activitylog.Logger
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	} else {
+		l = activitylog.Noop()
+	}
 	return &Watcher{
 		indexer:  indexer,
 		watcher:  fw,
+		logger:   l,
 		watching: make(map[string]struct{}),
 	}, nil
 }
@@ -58,10 +69,7 @@ func (w *Watcher) IndexDir(ctx context.Context, dir string) error {
 
 // Watch starts watching dir (and all subdirectories discovered during the
 // initial walk) for file-system changes. It blocks until ctx is cancelled.
-// Call IndexDir first if you want an initial bulk index, or call Watch
-// directly if you only want incremental updates.
 func (w *Watcher) Watch(ctx context.Context, dir string) error {
-	// Register the root dir and every subdirectory.
 	if err := w.addDir(dir); err != nil {
 		return err
 	}
@@ -99,6 +107,11 @@ func (w *Watcher) Watch(ctx context.Context, dir string) error {
 // Close releases the underlying fsnotify watcher.
 func (w *Watcher) Close() error {
 	return w.watcher.Close()
+}
+
+// SimulateEvent injects a synthetic fsnotify event for testing.
+func (w *Watcher) SimulateEvent(ctx context.Context, event fsnotify.Event) {
+	w.handleEvent(ctx, event)
 }
 
 // ─── Internal ──────────────────────────────────────────────────────────────────
@@ -148,8 +161,16 @@ func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 		}
 
 	case event.Has(fsnotify.Remove), event.Has(fsnotify.Rename):
-		slog.Info("crawler: file removed", "path", path)
-		// index.Engine.Add is idempotent — no remove API yet; log only.
+		if !SupportedExt(ext) {
+			return
+		}
+		absPath, _ := filepath.Abs(path)
+		slog.Info("crawler: removing deleted file from index", "path", path)
+		if err := w.indexer.Remove(ctx, absPath); err != nil {
+			slog.Warn("crawler: remove failed", "path", path, "error", err)
+		} else {
+			w.logger.Log("REMOVED", absPath)
+		}
 	}
 }
 
@@ -162,5 +183,9 @@ func (w *Watcher) indexFile(ctx context.Context, path string) error {
 	if err != nil {
 		absPath = path
 	}
-	return w.indexer.Add(ctx, absPath, text)
+	if err := w.indexer.Add(ctx, absPath, text); err != nil {
+		return err
+	}
+	w.logger.Log("INDEXED", absPath)
+	return nil
 }

@@ -31,7 +31,8 @@ func init() {
 	rootCmd.SilenceUsage = true
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		switch cmd.CommandPath() {
-		case "zenith setup", "zenith version", "zenith update":
+		case "zenith setup", "zenith version", "zenith update",
+			"zenith uninstall", "zenith watch uninstall":
 			return nil
 		}
 		return checkSetupDone()

@@ -104,6 +104,43 @@ func (w *Watcher) Watch(ctx context.Context, dir string) error {
 	}
 }
 
+// WatchMultiple registers all dirs with the fsnotify watcher, then runs a
+// single shared event loop until ctx is cancelled. Use this instead of
+// calling Watch concurrently when you want to watch several directories.
+func (w *Watcher) WatchMultiple(ctx context.Context, dirs []string) error {
+	for _, dir := range dirs {
+		if err := w.addDir(dir); err != nil {
+			return err
+		}
+		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || !d.IsDir() {
+				return nil
+			}
+			return w.addDir(path)
+		}); err != nil {
+			return err
+		}
+		slog.Info("crawler: watching directory", "dir", dir)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return w.watcher.Close()
+		case event, ok := <-w.watcher.Events:
+			if !ok {
+				return nil
+			}
+			w.handleEvent(ctx, event)
+		case err, ok := <-w.watcher.Errors:
+			if !ok {
+				return nil
+			}
+			slog.Warn("crawler: fsnotify error", "error", err)
+		}
+	}
+}
+
 // Close releases the underlying fsnotify watcher.
 func (w *Watcher) Close() error {
 	return w.watcher.Close()

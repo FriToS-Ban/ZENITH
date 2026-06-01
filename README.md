@@ -50,8 +50,10 @@ zenith search "kubernetes memory debugging"
 # More results
 zenith search -n 20 "kubernetes memory debugging"
 
-# Index and keep watching for file changes
-zenith watch --index-first ~/Documents
+# Watch a directory and auto-start on every boot
+zenith watch add ~/Documents
+zenith watch install          # registers OS boot auto-start
+zenith watch start            # start watching now (also runs automatically on boot)
 
 # Start gRPC server for remote access
 zenith serve --port 8080
@@ -80,6 +82,8 @@ The first run auto-starts the nerve embedding service in the background if Pytho
 | Ollama embedder                                      | Active          | Needs Ollama installed               |
 | gRPC server (`zenith serve`)                         | Active          | Port 8080 default                    |
 | fsnotify incremental watching                        | Active          |                                      |
+| Persistent watchlist (`~/.zenith/watchlist.json`)    | Active          |                                      |
+| Boot auto-start (Windows / Linux / macOS)            | Active          |                                      |
 | `.txt` `.md` `.go` `.html` extractors                | Active          |                                      |
 | PDF extraction                                       | Not implemented | Planned                              |
 | OpenAI embedder                                      | Not implemented | Planned                              |
@@ -280,29 +284,189 @@ service SearchService {
 
 ## CLI Reference
 
+### `zenith index`
+
+Recursively walks a directory, extracts text from each supported file, and adds it to the local index (`zenith.db`). Running index twice is safe — documents are re-indexed idempotently.
+
+```bash
+# Index a directory
+zenith index ~/Documents
+
+# Index with a specific embedder
+zenith index --embedder ollama ~/Documents
+
+# Index to a custom database file
+zenith index --db my-index.db ~/Projects
+
+# Index with a custom FST path
+zenith index --fst ./data/custom.fst ~/Documents
 ```
-zenith index  <directory>   Bulk-index all supported files
-zenith search <query>       Run a hybrid search query
-zenith watch  <directory>   Incrementally index on file changes
-zenith serve                Start the gRPC server
-zenith version              Print version
 
-Common flags (all commands):
-  --db           string   Index database file            (default: zenith.db)
-  --fst          string   On-disk FST path               (default: ./data/index.fst)
-  --embedder     string   auto|nerve|ollama|deterministic (default: auto)
-  --ollama-url   string   Ollama URL                     (default: http://localhost:11434)
-  --ollama-model string   Ollama model                   (default: nomic-embed-text)
-  --nerve-url    string   Nerve sidecar URL              (default: http://127.0.0.1:8000)
+**Flags:**
+```
+--db           string   Index database file            (default: zenith.db)
+--fst          string   On-disk FST path               (default: ./data/index.fst)
+--embedder     string   auto|nerve|ollama|deterministic (default: auto)
+--ollama-url   string   Ollama URL                     (default: http://localhost:11434)
+--ollama-model string   Ollama model                   (default: nomic-embed-text)
+--nerve-url    string   Nerve sidecar URL              (default: http://127.0.0.1:8000)
+```
 
-search flags:
-  -n, --max int   Maximum results                        (default: 10)
+---
 
-watch flags:
-  --index-first   Bulk-index before starting the watcher
+### `zenith search`
 
-serve flags:
-  -p, --port string   gRPC listen port                   (default: 8080)
+Loads the local index and runs a hybrid search query (lexical + fuzzy + semantic). No server needed — the engine runs in-process.
+
+```bash
+# Basic search
+zenith search "kubernetes memory debugging"
+
+# Show more results (default: 10)
+zenith search -n 20 "kubernetes memory debugging"
+
+# Single-word query
+zenith search goroutine
+
+# Multi-word phrase
+zenith search "connection pool timeout"
+
+# Search with a specific embedder
+zenith search --embedder deterministic "offline query"
+
+# Search a different database
+zenith search --db my-index.db "query"
+
+# Typo-tolerant — BK-tree fuzzy matching handles this automatically
+zenith search "kubernets deployement"
+```
+
+**Flags:**
+```
+-n, --max int   Maximum results to display             (default: 10)
+--db            string   Index database file           (default: zenith.db)
+--embedder      string   auto|nerve|ollama|deterministic (default: auto)
+```
+
+---
+
+### `zenith watch`
+
+Manages a persistent list of directories to keep indexed in real time. File changes (create, modify, rename, delete) are detected immediately via fsnotify and re-indexed without manual intervention.
+
+#### Persistent watching (recommended)
+
+```bash
+# Add a directory to the watchlist
+zenith watch add ~/Documents
+
+# Add multiple directories
+zenith watch add ~/Documents
+zenith watch add ~/Projects/notes
+zenith watch add ~/Desktop
+
+# View the current watchlist
+zenith watch list
+
+# Remove a directory from the watchlist
+zenith watch remove ~/Desktop
+
+# Start watching all directories in the watchlist (blocks until Ctrl-C)
+zenith watch start
+
+# Register auto-start so 'zenith watch start' runs on every boot
+zenith watch install
+
+# Remove the auto-start entry
+zenith watch uninstall
+```
+
+**Where auto-start registers:**
+| Platform | Location |
+|---|---|
+| Windows | Task Scheduler — task named `ZenithWatch`, triggers at user login (30s delay) |
+| Linux | `~/.config/systemd/user/zenith-watch.service` |
+| macOS | `~/Library/LaunchAgents/com.zenith.watch.plist` |
+
+No administrator rights are required on any platform.
+
+#### One-shot watching (not saved to watchlist)
+
+```bash
+# Watch a directory once (not added to watchlist)
+zenith watch run ~/Downloads
+
+# Watch and bulk-index first
+zenith watch run --index-first ~/Documents
+
+# Watch with a specific embedder
+zenith watch run --embedder ollama ~/Documents
+```
+
+**Flags for `watch run`:**
+```
+--index-first   Bulk-index directory before starting the watcher
+--db            string   Index database file           (default: zenith.db)
+--embedder      string   auto|nerve|ollama|deterministic (default: auto)
+```
+
+---
+
+### `zenith log`
+
+Displays the persistent activity log at `~/.zenith/zenith.log`.
+
+**Event types:** `INDEXED`, `REMOVED`, `SEARCH`, `NERVE`, `SAVED`, `LOADED`, `PDF`
+
+```bash
+# Show last 50 events (default)
+zenith log
+
+# Show last 100 events
+zenith log -n 100
+
+# Show all events (no limit)
+zenith log -n 0
+
+# Stream new events live (like tail -f)
+zenith log -f
+
+# Filter to a specific event type
+zenith log --type SEARCH
+zenith log --type INDEXED
+zenith log --type NERVE
+
+# Filter and follow live
+zenith log --type INDEXED -f
+
+# Last 20 search events
+zenith log -n 20 --type SEARCH
+```
+
+**Flags:**
+```
+-n, --lines int    Number of lines to show             (default: 50)
+-f, --follow       Stream new events live (Ctrl-C to stop)
+    --type string  Filter by event type (SEARCH, INDEXED, REMOVED, NERVE, SAVED, LOADED)
+```
+
+---
+
+### Other commands
+
+```bash
+# Start the gRPC server (port 8080 by default)
+zenith serve
+zenith serve --port 9090
+
+# Print version
+zenith version
+
+# Remove the binary and nerve sidecar (preserves index data)
+zenith uninstall
+
+# Update to the latest version
+zenith update
 ```
 
 ---
@@ -408,11 +572,13 @@ Because the point of ZENITH is to understand the storage layer — not consume i
 ```
 ZENITH/
 ├── cmd/
-│   ├── zenith/               # CLI entrypoint (cobra) — index, search, watch, serve
+│   ├── zenith/               # CLI entrypoint (cobra) — index, search, watch, serve, log
 │   └── server/               # standalone gRPC server
 ├── internal/
 │   ├── analysis/             # tokenizer, stemmer, n-grams, phonetic, BK-tree, FST
 │   ├── crawler/              # fsnotify file watcher + text extractors
+│   ├── watchlist/            # persistent watchlist (~/.zenith/watchlist.json)
+│   ├── autostart/            # OS boot auto-start (Windows/Linux/macOS)
 │   ├── embedding/            # Ollama, nerve, deterministic adapters + LRU cache
 │   ├── nervemanager/         # nerve lifecycle: embed, extract, venv, auto-start
 │   │   └── assets/           # main.py + requirements.txt (baked into binary)

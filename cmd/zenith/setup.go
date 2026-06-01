@@ -132,10 +132,10 @@ func runSetup() error {
 		}
 	}
 
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer waitCancel()
-	if !nm.WaitReady(waitCtx, 20*time.Second) {
-		fmt.Printf("  %s  nerve did not start within 20 s\n", yellow("!"))
+	if !nm.WaitReady(waitCtx, 90*time.Second) {
+		fmt.Printf("  %s  nerve did not start within 90 s\n", yellow("!"))
 		fmt.Printf("       check %s\n\n", dim("~/.zenith/nerve/nerve.log"))
 		return fmt.Errorf("setup [3/4] failed: nerve timeout")
 	}

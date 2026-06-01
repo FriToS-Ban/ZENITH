@@ -313,9 +313,10 @@ func (m *Manager) venvOKPath() string {
 	return filepath.Join(m.dir, "venv_ok")
 }
 
-// venvIsValid returns true when the venv binary exists on disk AND the sentinel hash
-// matches the current requirements.txt. The existence check catches venvs that were
-// deleted or quarantined by antivirus while the sentinel was still present.
+// venvIsValid returns true when the venv binary exists on disk, the sentinel hash
+// matches the current requirements.txt, AND a quick import check confirms that
+// critical packages (grpcio, protobuf) are actually present. The import check
+// catches installs that completed with missing transitive deps.
 func (m *Manager) venvIsValid() bool {
 	if !fileExists(m.venvPython()) {
 		return false
@@ -329,7 +330,13 @@ func (m *Manager) venvIsValid() bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(got)) == want
+	if strings.TrimSpace(string(got)) != want {
+		return false
+	}
+	// Verify that the packages nerve actually imports at startup are present.
+	// This catches venvs where protobuf was missing as a transitive dep.
+	check := exec.Command(m.venvPython(), "-c", "import grpc; import google.protobuf")
+	return check.Run() == nil
 }
 
 func (m *Manager) markVenvOK() {

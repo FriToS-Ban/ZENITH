@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 
@@ -64,16 +65,13 @@ func (d *FSTDictionary) Build(terms []string) error {
 
 // ─── On-disk build ────────────────────────────────────────────────────────────
 
-// BuildToFile builds the FST and writes it atomically to path, then reopens
-// the file via memory mapping so subsequent reads page in from disk on demand.
+// BuildToFile builds the FST and writes it atomically to path, then reloads it.
 //
-// Write is atomic: the FST is first written to path+".tmp", synced, then
-// renamed over path so a crash mid-write never leaves a corrupt file.
-//
-// On Windows, os.Rename fails with "Access is denied" if the destination file
-// is still held open by a memory-map. BuildToFile therefore closes the existing
-// mmap under the write lock before renaming, keeping the window where the FST
-// is unavailable to readers as short as possible.
+// On Linux/macOS the file is memory-mapped (vellum.Open) for efficient paging.
+// On Windows, mmap is avoided entirely: the FST is read into memory with
+// vellum.Load so no file handle is kept open. This is required because Windows
+// refuses to rename over a file that has any open handle — whether from our own
+// mmap, OneDrive sync, or Windows Defender — producing "Access is denied".
 func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	deduped := sortAndDedup(terms)
 	tmpPath := path + ".tmp"
@@ -95,8 +93,8 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	}
 	f.Close()
 
-	// Hold the write lock for close → rename → reopen so readers never see a
-	// nil FST and the mmap handle is released before the rename (required on Windows).
+	// Hold the write lock for the entire close → rename → reload sequence so
+	// readers never observe a nil FST during the swap.
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -104,35 +102,55 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	d.fst = nil
 	d.built = false
 
+	// On Windows: remove the destination before rename so that no external
+	// handle (cloud sync, antivirus) can block the operation.
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(path)
+	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("fst: rename to %s: %w", path, err)
 	}
 
-	newFST, err := vellum.Open(path)
+	newFST, err := loadFST(path)
 	if err != nil {
-		return fmt.Errorf("fst: open %s: %w", path, err)
+		return fmt.Errorf("fst: load %s: %w", path, err)
 	}
 	d.fst = newFST
 	d.built = true
 	return nil
 }
 
-// OpenFromFile opens path as a memory-mapped FST, replacing any existing FST.
-// The old FST (if any) is closed first to release its mmap.
-// Returns an error if the file does not exist or is corrupt.
+// OpenFromFile loads the FST at path, replacing any existing FST.
+// The old FST (if any) is closed first to release any resources it holds.
 func (d *FSTDictionary) OpenFromFile(path string) error {
-	newFST, err := vellum.Open(path)
+	newFST, err := loadFST(path)
 	if err != nil {
 		return fmt.Errorf("fst: open %s: %w", path, err)
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	closeFST(d.fst) // release old mmap
+	closeFST(d.fst)
 	d.fst = newFST
 	d.built = true
 	return nil
+}
+
+// loadFST opens the FST at path.
+// On Windows the file is read fully into memory (vellum.Load) so no file handle
+// remains open after this call. On other platforms it is memory-mapped
+// (vellum.Open) so the OS can page in only the portions that are accessed.
+func loadFST(path string) (*vellum.FST, error) {
+	if runtime.GOOS == "windows" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return vellum.Load(data)
+	}
+	return vellum.Open(path)
 }
 
 // Close releases any memory mapping held by the FST.

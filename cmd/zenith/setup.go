@@ -64,14 +64,14 @@ var setupCmd = &cobra.Command{
 	Long: `Prepares ZENITH for use by running four steps:
 
   [1/4] Create the Python virtual environment
-  [2/4] Install packages via uv (torch, sentence-transformers, ~2 GB)
+  [2/4] Install packages via uv (torch CPU + dependencies, ~600 MB)
   [3/4] Start the nerve gRPC server and verify it responds
-  [4/4] Download embedding model weights (~1.6 GB — up to 20 min on first run)
+  [4/4] Load embedding models (downloads weights on first run — up to 20 min)
 
 Run this once after 'go install'. All other zenith commands are blocked until
 setup completes successfully.
 
-Use --force to wipe the environment and start from scratch.`,
+Use --force to kill any running nerve process, wipe the venv, and start fresh.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSetup()
 	},
@@ -79,7 +79,7 @@ Use --force to wipe the environment and start from scratch.`,
 
 func init() {
 	setupCmd.Flags().BoolVar(&setupFlags.force, "force", false,
-		"Delete the setup sentinel and venv, then redo everything from scratch")
+		"Kill running nerve, wipe the venv, and redo everything from scratch")
 }
 
 func runSetup() error {
@@ -88,7 +88,9 @@ func runSetup() error {
 	nm := nervemanager.New()
 
 	if setupFlags.force {
-		fmt.Printf("  %s  --force: clearing previous setup state\n\n", yellow("!"))
+		fmt.Printf("  %s  --force: stopping nerve and clearing previous setup state\n\n", yellow("!"))
+		_ = nm.Kill()
+		time.Sleep(500 * time.Millisecond)
 		_ = os.Remove(setupSentinelPath())
 		nm.ResetSetup()
 	}
@@ -117,13 +119,20 @@ func runSetup() error {
 	}
 	fmt.Printf("  %s  packages installed\n", green("✓"))
 
-	// ── [3/4] Nerve smoke test ────────────────────────────────────────────────
+	// ── [3/4] Start nerve ─────────────────────────────────────────────────────
 	fmt.Printf("\n  %s  Starting nerve\n", dim("[3/4]"))
 
-	// If already running (e.g. from a previous partial run), skip launch.
+	// Kill and relaunch if nerve is already running with stale code.
 	quickCtx, quickCancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	alreadyUp := nm.WaitReady(quickCtx, 400*time.Millisecond)
 	quickCancel()
+
+	if alreadyUp && !nm.NerveCodeUpToDate() {
+		fmt.Printf("  %s  nerve running with stale code — restarting\n", dim("·"))
+		_ = nm.Kill()
+		time.Sleep(500 * time.Millisecond)
+		alreadyUp = false
+	}
 
 	if !alreadyUp {
 		if err := nm.Launch(); err != nil {
@@ -136,9 +145,10 @@ func runSetup() error {
 	defer waitCancel()
 	if !nm.WaitReady(waitCtx, 30*time.Second) {
 		fmt.Printf("  %s  nerve did not start within 30 s\n", yellow("!"))
-		fmt.Printf("       check %s\n\n", dim("~/.zenith/nerve/nerve.log"))
+		fmt.Printf("       check %s\n\n", dim(nm.LogPath()))
 		return fmt.Errorf("setup [3/4] failed: nerve timeout")
 	}
+	nm.MarkNerveVersionOK()
 	fmt.Printf("  %s  nerve listening on %s\n", green("✓"), dim(nm.Addr()))
 
 	// ── [4/4] Model warm-up ───────────────────────────────────────────────────
@@ -157,7 +167,7 @@ func runSetup() error {
 	vec, err := nc.Embedder().Embed(warmCtx, "zenith model warmup")
 	if err != nil || len(vec) == 0 {
 		fmt.Printf("  %s  model warm-up failed: %v\n", yellow("!"), err)
-		fmt.Printf("       check %s\n\n", dim("~/.zenith/nerve/nerve.log"))
+		fmt.Printf("       check %s\n\n", dim(nm.LogPath()))
 		return fmt.Errorf("setup [4/4] failed: %w", err)
 	}
 	fmt.Printf("  %s  models ready\n", green("✓"))

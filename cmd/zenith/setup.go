@@ -132,38 +132,30 @@ func runSetup() error {
 		}
 	}
 
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer waitCancel()
-	if !nm.WaitReady(waitCtx, 90*time.Second) {
-		fmt.Printf("  %s  nerve did not start within 90 s\n", yellow("!"))
+	if !nm.WaitReady(waitCtx, 30*time.Second) {
+		fmt.Printf("  %s  nerve did not start within 30 s\n", yellow("!"))
 		fmt.Printf("       check %s\n\n", dim("~/.zenith/nerve/nerve.log"))
 		return fmt.Errorf("setup [3/4] failed: nerve timeout")
 	}
+	fmt.Printf("  %s  nerve listening on %s\n", green("✓"), dim(nm.Addr()))
+
+	// ── [4/4] Model warm-up ───────────────────────────────────────────────────
+	fmt.Printf("\n  %s  Warming up models  %s\n", dim("[4/4]"),
+		dim("(loading torch + downloading weights on first run — up to 20 min)"))
 
 	nc, err := nerve.NewNerveClient(nm.Addr())
 	if err != nil {
 		fmt.Printf("  %s  could not dial nerve: %v\n\n", yellow("!"), err)
-		return fmt.Errorf("setup [3/4] failed: %w", err)
+		return fmt.Errorf("setup [4/4] failed: %w", err)
 	}
 	defer nc.Close()
 
-	smokeCtx, smokeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer smokeCancel()
-	vec, err := nc.Embedder().Embed(smokeCtx, "zenith setup smoke test")
-	if err != nil || len(vec) == 0 {
-		fmt.Printf("  %s  smoke test failed: %v\n\n", yellow("!"), err)
-		return fmt.Errorf("setup [3/4] failed: smoke test")
-	}
-	fmt.Printf("  %s  nerve responding on %s\n", green("✓"), dim(nm.Addr()))
-
-	// ── [4/4] Model warm-up ───────────────────────────────────────────────────
-	fmt.Printf("\n  %s  Warming up models  %s\n", dim("[4/4]"),
-		dim("(downloading ~1.6 GB on first run — up to 20 min)"))
-
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer warmCancel()
-	_, err = nc.Embedder().Embed(warmCtx, "zenith model warmup")
-	if err != nil {
+	vec, err := nc.Embedder().Embed(warmCtx, "zenith model warmup")
+	if err != nil || len(vec) == 0 {
 		fmt.Printf("  %s  model warm-up failed: %v\n", yellow("!"), err)
 		fmt.Printf("       check %s\n\n", dim("~/.zenith/nerve/nerve.log"))
 		return fmt.Errorf("setup [4/4] failed: %w", err)

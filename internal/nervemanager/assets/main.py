@@ -4,12 +4,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import fitz  # PyMuPDF
 import grpc
-import pdfplumber
-from PIL import Image
-from sentence_transformers import SentenceTransformer
-from transformers import BlipForConditionalGeneration, BlipProcessor
 
 import nerve_pb2
 import nerve_pb2_grpc
@@ -20,9 +15,10 @@ log = logging.getLogger(__name__)
 CHUNK_WORDS = 300
 CHUNK_OVERLAP = 50
 
-# Models are loaded lazily on first use so the gRPC server can bind to its port
-# immediately. On a fresh install this avoids timing out the health-check while
-# HuggingFace downloads ~1GB of weights in the background.
+# Heavy ML libraries (torch, sentence_transformers, transformers) are imported
+# inside _ensure_models() so the gRPC server can bind its port immediately on
+# startup. Without this, torch import alone can take 30-90 s, causing the
+# WaitReady health-check to time out before the server is even listening.
 _model_lock = threading.Lock()
 _embed_model = None
 _blip_processor = None
@@ -36,6 +32,9 @@ def _ensure_models() -> None:
     with _model_lock:
         if _embed_model is not None:
             return
+        from sentence_transformers import SentenceTransformer
+        from transformers import BlipForConditionalGeneration, BlipProcessor
+
         log.info("Loading all-MiniLM-L6-v2 embedding model...")
         _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
         log.info("Loading BLIP-base captioning model...")
@@ -55,6 +54,10 @@ def _split_into_chunks(text: str) -> list[str]:
 
 
 def _extract_pdf_sync(file_path: str, document_id: str) -> tuple[list[nerve_pb2.Chunk], int]:
+    import fitz  # PyMuPDF — deferred to avoid slowing server startup
+    import pdfplumber
+    from PIL import Image
+
     _ensure_models()
     chunks: list[nerve_pb2.Chunk] = []
     fitz_doc = fitz.open(file_path)

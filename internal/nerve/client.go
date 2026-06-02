@@ -41,6 +41,18 @@ func (c *NerveClient) Embedder() embedding.Embedder {
 	return &grpcEmbedder{stub: c.stub}
 }
 
+// ExtractImage calls the sidecar to caption and embed a standalone image file.
+func (c *NerveClient) ExtractImage(ctx context.Context, docID, filePath string) (string, []float32, error) {
+	resp, err := c.stub.ExtractImage(ctx, &nervepb.ExtractImageRequest{
+		DocumentId: docID,
+		FilePath:   filePath,
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("nerve: ExtractImage %s: %w", filePath, err)
+	}
+	return resp.Caption, resp.Embedding, nil
+}
+
 // ExtractPDF calls the sidecar to extract and embed all chunks from the PDF at filePath.
 func (c *NerveClient) ExtractPDF(ctx context.Context, docID, filePath string) ([]Chunk, error) {
 	resp, err := c.stub.ExtractPDF(ctx, &nervepb.ExtractPDFRequest{

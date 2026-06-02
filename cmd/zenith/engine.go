@@ -236,6 +236,23 @@ func autoEmbedder(_ *config.Config, alog *activitylog.Logger) (embedding.Embedde
 	return embedding.NewDeterministicEmbedder(384), "deterministic"
 }
 
+// buildNerveClient creates a NerveClient for rich-format indexing (PDF, images).
+// Returns nil only if the address cannot be resolved; the actual connection is
+// lazy so this may succeed even when Nerve isn't running yet.
+func buildNerveClient() *nerve.NerveClient {
+	appConfig := config.DefaultConfig()
+	addr := cliFlags.nerveURL
+	if addr == "" {
+		addr = appConfig.NerveGRPCAddr
+	}
+	addr = strings.TrimPrefix(strings.TrimPrefix(addr, "https://"), "http://")
+	nc, err := nerve.NewNerveClient(addr)
+	if err != nil {
+		return nil
+	}
+	return nc
+}
+
 // ollamaUp returns true if a local Ollama instance is responding.
 func ollamaUp() bool {
 	base := cliFlags.ollamaURL

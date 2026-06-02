@@ -131,7 +131,7 @@ func TestWatchMultipleRegistersAllDirs(t *testing.T) {
 
 func TestWatcher_HandleRemoveEvent_UnsupportedExt_NoCall(t *testing.T) {
 	dir := t.TempDir()
-	absPath := filepath.Join(dir, "image.png")
+	absPath := filepath.Join(dir, "video.mp4")
 
 	idx := &recordingIndexer{}
 	w, _ := crawler.NewWatcher(idx)

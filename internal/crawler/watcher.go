@@ -19,16 +19,25 @@ type Indexer interface {
 	Remove(ctx context.Context, id string) error
 }
 
+// FileIndexer handles files that require special extraction (PDFs, images)
+// rather than plain text via ExtractText. Both arguments are the same absolute path.
+type FileIndexer interface {
+	Index(ctx context.Context, docID, filePath string) (int, error)
+}
+
 // Watcher walks a directory tree, indexes every supported file, then keeps
 // the index current by watching for fsnotify events (create, write, rename,
 // remove). All file reads go through ExtractText so every format gets proper
-// text extraction.
+// text extraction. Rich formats (PDF, images) are dispatched to registered
+// FileIndexers rather than the plain-text path.
 type Watcher struct {
-	indexer  Indexer
-	watcher  *fsnotify.Watcher
-	logger   *activitylog.Logger
-	mu       sync.Mutex
-	watching map[string]struct{}
+	indexer       Indexer
+	fileIndexers  map[string]FileIndexer
+	onFileIndexed func(path string)
+	watcher       *fsnotify.Watcher
+	logger        *activitylog.Logger
+	mu            sync.Mutex
+	watching      map[string]struct{}
 }
 
 // NewWatcher creates a Watcher backed by indexer.
@@ -45,10 +54,11 @@ func NewWatcher(indexer Indexer, logger ...*activitylog.Logger) (*Watcher, error
 		l = activitylog.Noop()
 	}
 	return &Watcher{
-		indexer:  indexer,
-		watcher:  fw,
-		logger:   l,
-		watching: make(map[string]struct{}),
+		indexer:      indexer,
+		fileIndexers: make(map[string]FileIndexer),
+		watcher:      fw,
+		logger:       l,
+		watching:     make(map[string]struct{}),
 	}, nil
 }
 
@@ -146,6 +156,19 @@ func (w *Watcher) Close() error {
 	return w.watcher.Close()
 }
 
+// RegisterFileIndexer registers fi as the handler for files with the given extension.
+// ext must include the leading dot (e.g. ".pdf"). Overwrites any prior registration.
+func (w *Watcher) RegisterFileIndexer(ext string, fi FileIndexer) {
+	w.fileIndexers[strings.ToLower(ext)] = fi
+}
+
+// SetOnFileIndexed registers a callback invoked after a rich-format file (PDF,
+// image) is successfully indexed. Use this to count such files separately from
+// the text-file path that goes through Indexer.Add.
+func (w *Watcher) SetOnFileIndexed(fn func(path string)) {
+	w.onFileIndexed = fn
+}
+
 // SimulateEvent injects a synthetic fsnotify event for testing.
 func (w *Watcher) SimulateEvent(ctx context.Context, event fsnotify.Event) {
 	w.handleEvent(ctx, event)
@@ -212,13 +235,28 @@ func (w *Watcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 }
 
 func (w *Watcher) indexFile(ctx context.Context, path string) error {
-	text, err := ExtractText(path)
-	if err != nil {
-		return err
-	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		absPath = path
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	if fi, ok := w.fileIndexers[ext]; ok {
+		_, ferr := fi.Index(ctx, absPath, absPath)
+		if ferr != nil {
+			slog.Warn("crawler: rich-format index failed, skipping", "path", path, "error", ferr)
+			return nil
+		}
+		if w.onFileIndexed != nil {
+			w.onFileIndexed(absPath)
+		}
+		w.logger.Log("INDEXED", absPath)
+		return nil
+	}
+
+	text, err := ExtractText(path)
+	if err != nil {
+		return err
 	}
 	if err := w.indexer.Add(ctx, absPath, text); err != nil {
 		return err

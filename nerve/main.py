@@ -122,6 +122,16 @@ def _extract_pdf_sync(file_path: str, document_id: str) -> tuple[list[nerve_pb2.
     return chunks, total_pages
 
 
+def _extract_image_sync(file_path: str, document_id: str) -> tuple[str, list[float]]:
+    _ensure_models()
+    img = Image.open(file_path).convert("RGB")
+    inputs = _blip_processor(img, return_tensors="pt")
+    out = _blip_model.generate(**inputs, max_new_tokens=50)
+    caption = _blip_processor.decode(out[0], skip_special_tokens=True)
+    embedding = _embed_model.encode(caption).tolist()
+    return caption, embedding
+
+
 class NerveServicer(nerve_pb2_grpc.NerveServiceServicer):
     def __init__(self):
         self._executor = ThreadPoolExecutor(max_workers=4)
@@ -159,6 +169,22 @@ class NerveServicer(nerve_pb2_grpc.NerveServiceServicer):
             return
 
         return nerve_pb2.ExtractPDFResponse(chunks=chunks, total_pages=total_pages)
+
+    async def ExtractImage(self, request, context):
+        loop = asyncio.get_event_loop()
+        try:
+            caption, embedding = await loop.run_in_executor(
+                self._executor,
+                lambda: _extract_image_sync(request.file_path, request.document_id),
+            )
+        except FileNotFoundError:
+            await context.abort(grpc.StatusCode.NOT_FOUND, f"file not found: {request.file_path}")
+            return
+        except Exception as exc:
+            log.error("ExtractImage failed for %s: %s", request.file_path, exc)
+            await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+            return
+        return nerve_pb2.ExtractImageResponse(caption=caption, embedding=embedding)
 
 
 async def serve():

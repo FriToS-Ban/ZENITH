@@ -10,6 +10,8 @@ import (
 
 	"github.com/shramanb113/ZENITH/internal/autostart"
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	imageindexer "github.com/shramanb113/ZENITH/internal/image"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/watchlist"
 	"github.com/spf13/cobra"
 )
@@ -137,6 +139,16 @@ var watchStartCmd = &cobra.Command{
 		}
 		defer w.Close()
 
+		if nc := buildNerveClient(); nc != nil {
+			defer nc.Close()
+			pi := pdf.NewIndexer(nc, engine, alog)
+			w.RegisterFileIndexer(".pdf", pi)
+			ii := imageindexer.NewIndexer(nc, engine, alog)
+			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+				w.RegisterFileIndexer(ext, ii)
+			}
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -196,6 +208,16 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 			return err
 		}
 		defer w.Close()
+
+		if nc := buildNerveClient(); nc != nil {
+			defer nc.Close()
+			pi := pdf.NewIndexer(nc, engine, alog)
+			w.RegisterFileIndexer(".pdf", pi)
+			ii := imageindexer.NewIndexer(nc, engine, alog)
+			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+				w.RegisterFileIndexer(ext, ii)
+			}
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

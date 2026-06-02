@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	imageindexer "github.com/shramanb113/ZENITH/internal/image"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/spf13/cobra"
 )
 
@@ -51,6 +53,23 @@ Supported formats:
 			return err
 		}
 		defer w.Close()
+
+		// Wire PDF and image indexers via the Nerve sidecar (best-effort).
+		if nc := buildNerveClient(); nc != nil {
+			defer nc.Close()
+			pi := pdf.NewIndexer(nc, engine, alog)
+			w.RegisterFileIndexer(".pdf", pi)
+
+			ii := imageindexer.NewIndexer(nc, engine, alog)
+			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+				w.RegisterFileIndexer(ext, ii)
+			}
+
+			w.SetOnFileIndexed(func(path string) {
+				n := count.Add(1)
+				printProgress(n, filepath.Base(path))
+			})
+		}
 
 		start := time.Now()
 		ctx := context.Background()

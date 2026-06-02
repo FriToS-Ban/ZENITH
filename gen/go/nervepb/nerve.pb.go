@@ -453,6 +453,110 @@ func (x *ExtractPDFResponse) GetTotalPages() int32 {
 	return 0
 }
 
+type ExtractImageRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	DocumentId    string                 `protobuf:"bytes,2,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtractImageRequest) Reset() {
+	*x = ExtractImageRequest{}
+	mi := &file_nerve_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtractImageRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtractImageRequest) ProtoMessage() {}
+
+func (x *ExtractImageRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nerve_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtractImageRequest.ProtoReflect.Descriptor instead.
+func (*ExtractImageRequest) Descriptor() ([]byte, []int) {
+	return file_nerve_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ExtractImageRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+func (x *ExtractImageRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+type ExtractImageResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Caption       string                 `protobuf:"bytes,1,opt,name=caption,proto3" json:"caption,omitempty"`
+	Embedding     []float32              `protobuf:"fixed32,2,rep,packed,name=embedding,proto3" json:"embedding,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtractImageResponse) Reset() {
+	*x = ExtractImageResponse{}
+	mi := &file_nerve_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtractImageResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtractImageResponse) ProtoMessage() {}
+
+func (x *ExtractImageResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nerve_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtractImageResponse.ProtoReflect.Descriptor instead.
+func (*ExtractImageResponse) Descriptor() ([]byte, []int) {
+	return file_nerve_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ExtractImageResponse) GetCaption() string {
+	if x != nil {
+		return x.Caption
+	}
+	return ""
+}
+
+func (x *ExtractImageResponse) GetEmbedding() []float32 {
+	if x != nil {
+		return x.Embedding
+	}
+	return nil
+}
+
 var File_nerve_proto protoreflect.FileDescriptor
 
 const file_nerve_proto_rawDesc = "" +
@@ -490,13 +594,21 @@ const file_nerve_proto_rawDesc = "" +
 	"\x12ExtractPDFResponse\x12$\n" +
 	"\x06chunks\x18\x01 \x03(\v2\f.nerve.ChunkR\x06chunks\x12\x1f\n" +
 	"\vtotal_pages\x18\x02 \x01(\x05R\n" +
-	"totalPages2\xc8\x01\n" +
+	"totalPages\"S\n" +
+	"\x13ExtractImageRequest\x12\x1b\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x12\x1f\n" +
+	"\vdocument_id\x18\x02 \x01(\tR\n" +
+	"documentId\"N\n" +
+	"\x14ExtractImageResponse\x12\x18\n" +
+	"\acaption\x18\x01 \x01(\tR\acaption\x12\x1c\n" +
+	"\tembedding\x18\x02 \x03(\x02R\tembedding2\x91\x02\n" +
 	"\fNerveService\x122\n" +
 	"\x05Embed\x12\x13.nerve.EmbedRequest\x1a\x14.nerve.EmbedResponse\x12A\n" +
 	"\n" +
 	"EmbedBatch\x12\x18.nerve.BatchEmbedRequest\x1a\x19.nerve.BatchEmbedResponse\x12A\n" +
 	"\n" +
-	"ExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\x19.nerve.ExtractPDFResponseB6Z4github.com/shramanb113/ZENITH/gen/go/nervepb;nervepbb\x06proto3"
+	"ExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\x19.nerve.ExtractPDFResponse\x12G\n" +
+	"\fExtractImage\x12\x1a.nerve.ExtractImageRequest\x1a\x1b.nerve.ExtractImageResponseB6Z4github.com/shramanb113/ZENITH/gen/go/nervepb;nervepbb\x06proto3"
 
 var (
 	file_nerve_proto_rawDescOnce sync.Once
@@ -510,16 +622,18 @@ func file_nerve_proto_rawDescGZIP() []byte {
 	return file_nerve_proto_rawDescData
 }
 
-var file_nerve_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_nerve_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_nerve_proto_goTypes = []any{
-	(*EmbedRequest)(nil),       // 0: nerve.EmbedRequest
-	(*EmbedResponse)(nil),      // 1: nerve.EmbedResponse
-	(*EmbedVector)(nil),        // 2: nerve.EmbedVector
-	(*BatchEmbedRequest)(nil),  // 3: nerve.BatchEmbedRequest
-	(*BatchEmbedResponse)(nil), // 4: nerve.BatchEmbedResponse
-	(*ExtractPDFRequest)(nil),  // 5: nerve.ExtractPDFRequest
-	(*Chunk)(nil),              // 6: nerve.Chunk
-	(*ExtractPDFResponse)(nil), // 7: nerve.ExtractPDFResponse
+	(*EmbedRequest)(nil),         // 0: nerve.EmbedRequest
+	(*EmbedResponse)(nil),        // 1: nerve.EmbedResponse
+	(*EmbedVector)(nil),          // 2: nerve.EmbedVector
+	(*BatchEmbedRequest)(nil),    // 3: nerve.BatchEmbedRequest
+	(*BatchEmbedResponse)(nil),   // 4: nerve.BatchEmbedResponse
+	(*ExtractPDFRequest)(nil),    // 5: nerve.ExtractPDFRequest
+	(*Chunk)(nil),                // 6: nerve.Chunk
+	(*ExtractPDFResponse)(nil),   // 7: nerve.ExtractPDFResponse
+	(*ExtractImageRequest)(nil),  // 8: nerve.ExtractImageRequest
+	(*ExtractImageResponse)(nil), // 9: nerve.ExtractImageResponse
 }
 var file_nerve_proto_depIdxs = []int32{
 	2, // 0: nerve.BatchEmbedResponse.embeddings:type_name -> nerve.EmbedVector
@@ -527,11 +641,13 @@ var file_nerve_proto_depIdxs = []int32{
 	0, // 2: nerve.NerveService.Embed:input_type -> nerve.EmbedRequest
 	3, // 3: nerve.NerveService.EmbedBatch:input_type -> nerve.BatchEmbedRequest
 	5, // 4: nerve.NerveService.ExtractPDF:input_type -> nerve.ExtractPDFRequest
-	1, // 5: nerve.NerveService.Embed:output_type -> nerve.EmbedResponse
-	4, // 6: nerve.NerveService.EmbedBatch:output_type -> nerve.BatchEmbedResponse
-	7, // 7: nerve.NerveService.ExtractPDF:output_type -> nerve.ExtractPDFResponse
-	5, // [5:8] is the sub-list for method output_type
-	2, // [2:5] is the sub-list for method input_type
+	8, // 5: nerve.NerveService.ExtractImage:input_type -> nerve.ExtractImageRequest
+	1, // 6: nerve.NerveService.Embed:output_type -> nerve.EmbedResponse
+	4, // 7: nerve.NerveService.EmbedBatch:output_type -> nerve.BatchEmbedResponse
+	7, // 8: nerve.NerveService.ExtractPDF:output_type -> nerve.ExtractPDFResponse
+	9, // 9: nerve.NerveService.ExtractImage:output_type -> nerve.ExtractImageResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
 	2, // [2:2] is the sub-list for extension extendee
 	0, // [0:2] is the sub-list for field type_name
@@ -548,7 +664,7 @@ func file_nerve_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nerve_proto_rawDesc), len(file_nerve_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

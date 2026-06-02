@@ -3,9 +3,10 @@ package nerve;
 option go_package = "github.com/shramanb113/ZENITH/gen/go/nervepb;nervepb";
 
 service NerveService {
-  rpc Embed(EmbedRequest)           returns (EmbedResponse);
-  rpc EmbedBatch(BatchEmbedRequest) returns (BatchEmbedResponse);
-  rpc ExtractPDF(ExtractPDFRequest) returns (ExtractPDFResponse);
+  rpc Embed(EmbedRequest)               returns (EmbedResponse);
+  rpc EmbedBatch(BatchEmbedRequest)     returns (BatchEmbedResponse);
+  rpc ExtractPDF(ExtractPDFRequest)     returns (ExtractPDFResponse);
+  rpc ExtractImage(ExtractImageRequest) returns (ExtractImageResponse);
 }
 
 message EmbedRequest        { string text = 1; }
@@ -34,4 +35,14 @@ message Chunk {
 message ExtractPDFResponse {
   repeated Chunk chunks = 1;
   int32 total_pages     = 2;
+}
+
+message ExtractImageRequest {
+  string file_path   = 1;
+  string document_id = 2;
+}
+
+message ExtractImageResponse {
+  string         caption   = 1;
+  repeated float embedding = 2;
 }

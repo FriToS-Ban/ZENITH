@@ -31,22 +31,29 @@ func NewIndexer(n *nerve.NerveClient, e *index.Engine, logger ...*activitylog.Lo
 }
 
 // Index extracts, embeds, and stores all chunks from the PDF at filePath.
-// Returns the number of chunks indexed. Fails fast on the first error —
-// no partial data is stored if indexing a chunk fails.
+// Returns the number of chunks indexed. Uses AddBatch to rebuild the FST
+// exactly once after all chunks are written, avoiding the O(vocab·log vocab)
+// rebuild cost that would otherwise fire after every individual chunk.
 func (p *PDFIndexer) Index(ctx context.Context, docID, filePath string) (int, error) {
 	chunks, err := p.nerve.ExtractPDF(ctx, docID, filePath)
 	if err != nil {
 		return 0, fmt.Errorf("pdf: extract %s: %w", filePath, err)
 	}
 
-	for _, c := range chunks {
-		id := fmt.Sprintf("%s||p%d||c%d||%s||%.2f,%.2f,%.2f,%.2f",
-			docID, c.Page, c.ChunkIndex, c.SourceType,
-			c.BboxX, c.BboxY, c.BboxW, c.BboxH,
-		)
-		if err := p.engine.AddWithVector(ctx, id, c.Text, c.Embedding); err != nil {
-			return 0, fmt.Errorf("pdf: index chunk %s: %w", id, err)
+	docs := make([]index.BatchDoc, len(chunks))
+	for i, c := range chunks {
+		docs[i] = index.BatchDoc{
+			ID: fmt.Sprintf("%s||p%d||c%d||%s||%.2f,%.2f,%.2f,%.2f",
+				docID, c.Page, c.ChunkIndex, c.SourceType,
+				c.BboxX, c.BboxY, c.BboxW, c.BboxH,
+			),
+			Text:   c.Text,
+			Vector: c.Embedding,
 		}
+	}
+
+	if err := p.engine.AddBatch(ctx, docs); err != nil {
+		return 0, fmt.Errorf("pdf: index chunks %s: %w", docID, err)
 	}
 
 	p.logger.Log("PDF", fmt.Sprintf("%s → %d chunks indexed", docID, len(chunks)))

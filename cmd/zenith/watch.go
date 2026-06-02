@@ -148,15 +148,15 @@ var watchStartCmd = &cobra.Command{
 			cancel()
 		}()
 
-		plural := "ies"
+		pluralSuffix := "ies"
 		if len(valid) == 1 {
-			plural = "y"
+			pluralSuffix = "y"
 		}
-		fmt.Printf("\n  %s  watching %d director%s\n", bold(cyan("watch")), len(valid), plural)
+		printHeader("watch", fmt.Sprintf("%d director%s", len(valid), pluralSuffix))
 		for _, d := range valid {
-			fmt.Printf("  %s  %s\n", cyan("→"), d)
+			fmt.Printf("  %s  %s\n", cc("→", cAccent), muted(d))
 		}
-		fmt.Printf("\n  %s\n\n", dim("Ctrl-C to stop"))
+		fmt.Printf("\n  %s\n\n", muted("Ctrl-C to stop"))
 
 		return w.WatchMultiple(ctx, valid)
 	},
@@ -215,7 +215,8 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 			}
 		}
 
-		fmt.Printf("\n  %s  %s  %s\n\n", bold(cyan("watch")), dir, dim("(Ctrl-C to stop)"))
+		printHeader("watch", dir)
+		fmt.Printf("  %s\n\n", muted("Ctrl-C to stop"))
 		return w.Watch(ctx, dir)
 	},
 }

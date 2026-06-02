@@ -96,31 +96,30 @@ func runSetup() error {
 	}
 
 	// ── [1/4] Python environment ──────────────────────────────────────────────
-	fmt.Printf("  %s  Python environment\n", dim("[1/4]"))
+	printStep(1, 4, "Python environment")
 	if err := nm.Extract(); err != nil {
-		fmt.Printf("  %s  failed to extract nerve files: %v\n\n", yellow("!"), err)
+		fmt.Printf("    %s  failed to extract nerve files: %v\n\n", yellow("!"), err)
 		return fmt.Errorf("setup [1/4] failed: %w", err)
 	}
 	python, err := nm.FindPython()
 	if err != nil {
-		fmt.Printf("  %s  Python 3 not found\n\n", yellow("!"))
-		fmt.Println("  Install Python 3.10+ from https://www.python.org/downloads/")
-		fmt.Println()
+		fmt.Printf("    %s  Python 3 not found\n\n", yellow("!"))
+		fmt.Printf("       Install Python 3.10+ from https://www.python.org/downloads/\n\n")
 		return fmt.Errorf("setup [1/4] failed: %w", err)
 	}
-	fmt.Printf("  %s  %s\n", green("✓"), dim(python))
+	fmt.Printf("    %s  %s\n", green("✓"), muted(python))
 
 	// ── [2/4] Installing packages ─────────────────────────────────────────────
-	fmt.Printf("\n  %s  Installing packages  %s\n", dim("[2/4]"),
-		dim("(torch CPU + dependencies, ~600 MB — may take several minutes)"))
+	printStep(2, 4, "Installing packages")
+	fmt.Printf("       %s\n", dim("(torch CPU + dependencies, ~600 MB — may take several minutes)"))
 	if err := nm.EnsureDeps(python); err != nil {
-		fmt.Printf("  %s  package install failed — see output above\n\n", yellow("!"))
+		fmt.Printf("    %s  package install failed — see output above\n\n", yellow("!"))
 		return fmt.Errorf("setup [2/4] failed: %w", err)
 	}
-	fmt.Printf("  %s  packages installed\n", green("✓"))
+	fmt.Printf("    %s  %s\n", green("✓"), muted("packages installed"))
 
 	// ── [3/4] Start nerve ─────────────────────────────────────────────────────
-	fmt.Printf("\n  %s  Starting nerve\n", dim("[3/4]"))
+	printStep(3, 4, "Starting nerve")
 
 	// Kill and relaunch if nerve is already running with stale code.
 	quickCtx, quickCancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
@@ -128,7 +127,7 @@ func runSetup() error {
 	quickCancel()
 
 	if alreadyUp && !nm.NerveCodeUpToDate() {
-		fmt.Printf("  %s  nerve running with stale code — restarting\n", dim("·"))
+		fmt.Printf("       %s  nerve running with stale code — restarting\n", muted("·"))
 		_ = nm.Kill()
 		time.Sleep(500 * time.Millisecond)
 		alreadyUp = false
@@ -136,7 +135,7 @@ func runSetup() error {
 
 	if !alreadyUp {
 		if err := nm.Launch(); err != nil {
-			fmt.Printf("  %s  failed to launch nerve: %v\n\n", yellow("!"), err)
+			fmt.Printf("    %s  failed to launch nerve: %v\n\n", yellow("!"), err)
 			return fmt.Errorf("setup [3/4] failed: %w", err)
 		}
 	}
@@ -144,20 +143,20 @@ func runSetup() error {
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer waitCancel()
 	if !nm.WaitReady(waitCtx, 30*time.Second) {
-		fmt.Printf("  %s  nerve did not start within 30 s\n", yellow("!"))
-		fmt.Printf("       check %s\n\n", dim(nm.LogPath()))
+		fmt.Printf("    %s  nerve did not start within 30 s\n", yellow("!"))
+		fmt.Printf("       check %s\n\n", muted(nm.LogPath()))
 		return fmt.Errorf("setup [3/4] failed: nerve timeout")
 	}
 	nm.MarkNerveVersionOK()
-	fmt.Printf("  %s  nerve listening on %s\n", green("✓"), dim(nm.Addr()))
+	fmt.Printf("    %s  %s\n", green("✓"), muted("nerve listening on "+nm.Addr()))
 
 	// ── [4/4] Model warm-up ───────────────────────────────────────────────────
-	fmt.Printf("\n  %s  Warming up models  %s\n", dim("[4/4]"),
-		dim("(loading torch + downloading weights on first run — up to 20 min)"))
+	printStep(4, 4, "Warming up models")
+	fmt.Printf("       %s\n", dim("(loading torch + downloading weights on first run — up to 20 min)"))
 
 	nc, err := nerve.NewNerveClient(nm.Addr())
 	if err != nil {
-		fmt.Printf("  %s  could not dial nerve: %v\n\n", yellow("!"), err)
+		fmt.Printf("    %s  could not dial nerve: %v\n\n", yellow("!"), err)
 		return fmt.Errorf("setup [4/4] failed: %w", err)
 	}
 	defer nc.Close()
@@ -166,11 +165,11 @@ func runSetup() error {
 	defer warmCancel()
 	vec, err := nc.Embedder().Embed(warmCtx, "zenith model warmup")
 	if err != nil || len(vec) == 0 {
-		fmt.Printf("  %s  model warm-up failed: %v\n", yellow("!"), err)
-		fmt.Printf("       check %s\n\n", dim(nm.LogPath()))
+		fmt.Printf("    %s  model warm-up failed: %v\n", yellow("!"), err)
+		fmt.Printf("       check %s\n\n", muted(nm.LogPath()))
 		return fmt.Errorf("setup [4/4] failed: %w", err)
 	}
-	fmt.Printf("  %s  models ready\n", green("✓"))
+	fmt.Printf("    %s  %s\n", green("✓"), muted("models ready"))
 
 	// ── Write sentinel ────────────────────────────────────────────────────────
 	if err := writeSetupSentinel(); err != nil {

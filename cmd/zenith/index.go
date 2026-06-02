@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -54,9 +55,11 @@ Supported formats:
 		start := time.Now()
 		ctx := context.Background()
 		if err := w.IndexDir(ctx, dir); err != nil {
+			clearProgress()
 			return fmt.Errorf("index: %w", err)
 		}
 
+		clearProgress()
 		elapsed := time.Since(start)
 		n := count.Load()
 
@@ -83,7 +86,8 @@ type countingIndexer struct {
 func (c *countingIndexer) Add(ctx context.Context, id, text string) error {
 	err := c.inner.Add(ctx, id, text)
 	if err == nil {
-		c.n.Add(1)
+		n := c.n.Add(1)
+		printProgress(n, filepath.Base(id))
 	}
 	return err
 }

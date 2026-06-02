@@ -253,18 +253,24 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 		}
 	}
 
-	if len(tokensToEmbed) > 0 {
-		batchVecs, err := e.embedder.EmbedBatch(ctx, tokensToEmbed)
-		if err == nil && len(batchVecs) == len(tokensToEmbed) {
-			for i, t := range tokensToEmbed {
+	const embedBatchSize = 512
+	for i := 0; i < len(tokensToEmbed); i += embedBatchSize {
+		end := i + embedBatchSize
+		if end > len(tokensToEmbed) {
+			end = len(tokensToEmbed)
+		}
+		chunk := tokensToEmbed[i:end]
+		batchVecs, err := e.embedder.EmbedBatch(ctx, chunk)
+		if err == nil && len(batchVecs) == len(chunk) {
+			for j, t := range chunk {
 				tempWordVectors[t] = VectorEntry{
-					Vector:    FloatsToFloat16(batchVecs[i]),
-					Magnitude: ranking.Magnitude(batchVecs[i]),
+					Vector:    FloatsToFloat16(batchVecs[j]),
+					Magnitude: ranking.Magnitude(batchVecs[j]),
 				}
 			}
 		} else {
 			logger.Warn("Batch embedding failed for tokens", "error", err)
-			for _, t := range tokensToEmbed {
+			for _, t := range chunk {
 				delete(tempWordVectors, t)
 			}
 		}

@@ -5,7 +5,7 @@ option go_package = "github.com/shramanb113/ZENITH/gen/go/nervepb;nervepb";
 service NerveService {
   rpc Embed(EmbedRequest)               returns (EmbedResponse);
   rpc EmbedBatch(BatchEmbedRequest)     returns (BatchEmbedResponse);
-  rpc ExtractPDF(ExtractPDFRequest)     returns (ExtractPDFResponse);
+  rpc ExtractPDF(ExtractPDFRequest)     returns (stream Chunk);
   rpc ExtractImage(ExtractImageRequest) returns (ExtractImageResponse);
 }
 

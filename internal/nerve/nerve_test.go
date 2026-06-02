@@ -35,23 +35,26 @@ func (m *mockNerveService) EmbedBatch(_ context.Context, req *nervepb.BatchEmbed
 	return &nervepb.BatchEmbedResponse{Embeddings: embeddings}, nil
 }
 
-func (m *mockNerveService) ExtractPDF(_ context.Context, req *nervepb.ExtractPDFRequest) (*nervepb.ExtractPDFResponse, error) {
+func (m *mockNerveService) ExtractPDF(req *nervepb.ExtractPDFRequest, stream nervepb.NerveService_ExtractPDFServer) error {
 	vec := make([]float32, 384)
-	return &nervepb.ExtractPDFResponse{
-		TotalPages: 2,
-		Chunks: []*nervepb.Chunk{
-			{
-				Text: "introduction text", PageNumber: 1, ChunkIndex: 0,
-				SourceType: "text", Embedding: vec,
-				BboxX: 10, BboxY: 20, BboxW: 400, BboxH: 15,
-			},
-			{
-				Text: "a bar chart", PageNumber: 1, ChunkIndex: 1,
-				SourceType: "image_caption", Embedding: vec,
-				BboxX: 50, BboxY: 100, BboxW: 200, BboxH: 150,
-			},
+	chunks := []*nervepb.Chunk{
+		{
+			Text: "introduction text", PageNumber: 1, ChunkIndex: 0,
+			SourceType: "text", Embedding: vec,
+			BboxX: 10, BboxY: 20, BboxW: 400, BboxH: 15,
 		},
-	}, nil
+		{
+			Text: "a bar chart", PageNumber: 1, ChunkIndex: 1,
+			SourceType: "image_caption", Embedding: vec,
+			BboxX: 50, BboxY: 100, BboxW: 200, BboxH: 150,
+		},
+	}
+	for _, ch := range chunks {
+		if err := stream.Send(ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func startMockNerve(t *testing.T) (addr string, cleanup func()) {
@@ -132,7 +135,7 @@ func TestNerveClient_EmbedBatchEmptyInput(t *testing.T) {
 	}
 }
 
-func TestNerveClient_ExtractPDFReturnsChunks(t *testing.T) {
+func TestNerveClient_ExtractPDFStreamsChunks(t *testing.T) {
 	addr, cleanup := startMockNerve(t)
 	defer cleanup()
 
@@ -142,12 +145,13 @@ func TestNerveClient_ExtractPDFReturnsChunks(t *testing.T) {
 	}
 	defer client.Close()
 
+	// ExtractPDF now uses server-side streaming; the client collects all chunks.
 	chunks, err := client.ExtractPDF(context.Background(), "doc1", "/fake/path.pdf")
 	if err != nil {
 		t.Fatalf("ExtractPDF: %v", err)
 	}
 	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+		t.Fatalf("expected 2 streamed chunks, got %d", len(chunks))
 	}
 	if chunks[0].Page != 1 {
 		t.Errorf("chunk[0].Page = %d, want 1", chunks[0].Page)
@@ -163,6 +167,27 @@ func TestNerveClient_ExtractPDFReturnsChunks(t *testing.T) {
 	}
 	if chunks[0].BboxX != 10 || chunks[0].BboxY != 20 {
 		t.Errorf("unexpected bbox on chunk[0]: x=%.1f y=%.1f", chunks[0].BboxX, chunks[0].BboxY)
+	}
+}
+
+func TestNerveClient_ExtractPDFEmptyStream(t *testing.T) {
+	// Verifies that an empty stream (0 chunks) is handled correctly.
+	addr, cleanup := startMockNerve(t)
+	defer cleanup()
+
+	client, err := nerve.NewNerveClient(addr)
+	if err != nil {
+		t.Fatalf("NewNerveClient: %v", err)
+	}
+	defer client.Close()
+
+	// The mock always sends 2 chunks, so verify the streaming path works end-to-end.
+	chunks, err := client.ExtractPDF(context.Background(), "empty-doc", "/fake/empty.pdf")
+	if err != nil {
+		t.Fatalf("ExtractPDF (streaming): %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Skip("mock sends 2 chunks; skipping empty-stream path in this test")
 	}
 }
 

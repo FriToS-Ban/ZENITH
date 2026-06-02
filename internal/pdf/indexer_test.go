@@ -33,23 +33,26 @@ func (m *mockPDFNerveService) EmbedBatch(_ context.Context, req *nervepb.BatchEm
 	return &nervepb.BatchEmbedResponse{Embeddings: embeddings}, nil
 }
 
-func (m *mockPDFNerveService) ExtractPDF(_ context.Context, req *nervepb.ExtractPDFRequest) (*nervepb.ExtractPDFResponse, error) {
+func (m *mockPDFNerveService) ExtractPDF(req *nervepb.ExtractPDFRequest, stream nervepb.NerveService_ExtractPDFServer) error {
 	vec := make([]float32, 384)
-	return &nervepb.ExtractPDFResponse{
-		TotalPages: 1,
-		Chunks: []*nervepb.Chunk{
-			{
-				Text: "quarterly revenue grew", PageNumber: 1, ChunkIndex: 0,
-				SourceType: "text", Embedding: vec,
-				BboxX: 10, BboxY: 20, BboxW: 400, BboxH: 15,
-			},
-			{
-				Text: "a pie chart showing market share", PageNumber: 1, ChunkIndex: 1,
-				SourceType: "image_caption", Embedding: vec,
-				BboxX: 50, BboxY: 100, BboxW: 200, BboxH: 150,
-			},
+	chunks := []*nervepb.Chunk{
+		{
+			Text: "quarterly revenue grew", PageNumber: 1, ChunkIndex: 0,
+			SourceType: "text", Embedding: vec,
+			BboxX: 10, BboxY: 20, BboxW: 400, BboxH: 15,
 		},
-	}, nil
+		{
+			Text: "a pie chart showing market share", PageNumber: 1, ChunkIndex: 1,
+			SourceType: "image_caption", Embedding: vec,
+			BboxX: 50, BboxY: 100, BboxW: 200, BboxH: 150,
+		},
+	}
+	for _, ch := range chunks {
+		if err := stream.Send(ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func startMockForPDF(t *testing.T) (addr string, cleanup func()) {

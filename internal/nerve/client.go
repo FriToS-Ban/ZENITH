@@ -3,6 +3,7 @@ package nerve
 import (
 	"context"
 	"fmt"
+	"io"
 
 	nervepb "github.com/shramanb113/ZENITH/gen/go/nervepb"
 	"github.com/shramanb113/ZENITH/internal/embedding"
@@ -53,18 +54,28 @@ func (c *NerveClient) ExtractImage(ctx context.Context, docID, filePath string) 
 	return resp.Caption, resp.Embedding, nil
 }
 
-// ExtractPDF calls the sidecar to extract and embed all chunks from the PDF at filePath.
+// ExtractPDF streams chunks from the sidecar as Python processes each page batch.
+// Chunks arrive progressively — Go buffers them and calls AddBatch once the
+// stream is exhausted, giving a single FST rebuild for the whole document.
 func (c *NerveClient) ExtractPDF(ctx context.Context, docID, filePath string) ([]Chunk, error) {
-	resp, err := c.stub.ExtractPDF(ctx, &nervepb.ExtractPDFRequest{
+	stream, err := c.stub.ExtractPDF(ctx, &nervepb.ExtractPDFRequest{
 		DocumentId: docID,
 		FilePath:   filePath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nerve: ExtractPDF %s: %w", filePath, err)
 	}
-	chunks := make([]Chunk, len(resp.Chunks))
-	for i, ch := range resp.Chunks {
-		chunks[i] = Chunk{
+
+	var chunks []Chunk
+	for {
+		ch, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("nerve: ExtractPDF stream %s: %w", filePath, err)
+		}
+		chunks = append(chunks, Chunk{
 			Text:       ch.Text,
 			Page:       int(ch.PageNumber),
 			ChunkIndex: int(ch.ChunkIndex),
@@ -74,7 +85,7 @@ func (c *NerveClient) ExtractPDF(ctx context.Context, docID, filePath string) ([
 			BboxY:      ch.BboxY,
 			BboxW:      ch.BboxW,
 			BboxH:      ch.BboxH,
-		}
+		})
 	}
 	return chunks, nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/shramanb113/ZENITH/internal/autostart"
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	"github.com/shramanb113/ZENITH/internal/fileindex"
 	imageindexer "github.com/shramanb113/ZENITH/internal/image"
 	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/watchlist"
@@ -232,6 +233,12 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 
 		if watchRunFlags.indexFirst {
 			fmt.Printf("  Bulk-indexing %s ...\n", dir)
+			home, _ := os.UserHomeDir()
+			if fi, err := fileindex.Open(filepath.Join(home, ".zenith", "file_hashes.json")); err == nil {
+				w.SetSkipFile(fi.IsUpToDate)
+				w.SetAfterFile(func(path string) { _ = fi.Mark(path) })
+				defer fi.Save()
+			}
 			if err := w.IndexDir(ctx, dir); err != nil {
 				return fmt.Errorf("initial index: %w", err)
 			}

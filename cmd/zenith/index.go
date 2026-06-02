@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	"github.com/shramanb113/ZENITH/internal/fileindex"
 	imageindexer "github.com/shramanb113/ZENITH/internal/image"
 	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/spf13/cobra"
@@ -69,6 +70,14 @@ Supported formats:
 				n := count.Add(1)
 				printProgress(n, filepath.Base(path))
 			})
+		}
+
+		// Content-hash deduplication: skip files unchanged since the last run.
+		home, _ := os.UserHomeDir()
+		if fi, err := fileindex.Open(filepath.Join(home, ".zenith", "file_hashes.json")); err == nil {
+			w.SetSkipFile(fi.IsUpToDate)
+			w.SetAfterFile(func(path string) { _ = fi.Mark(path) })
+			defer fi.Save()
 		}
 
 		start := time.Now()

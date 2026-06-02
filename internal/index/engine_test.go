@@ -403,6 +403,104 @@ func TestEngine_Remove_ReAdd(t *testing.T) {
 	}
 }
 
+// ─── AddBatch ────────────────────────────────────────────────────────────────
+
+func TestEngine_AddBatch_IndexesAllDocs(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "b1", Text: "distributed tracing observability", Vector: make([]float32, 384)},
+		{ID: "b2", Text: "container orchestration kubernetes", Vector: make([]float32, 384)},
+		{ID: "b3", Text: "machine learning inference pipeline", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	for _, d := range docs {
+		results, err := e.Search(ctx, d.Text[:10])
+		if err != nil {
+			t.Fatalf("Search(%q): %v", d.Text[:10], err)
+		}
+		found := false
+		for _, r := range results {
+			if r.ID == d.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("doc %q not found after AddBatch", d.ID)
+		}
+	}
+}
+
+func TestEngine_AddBatch_FSTRebuildOnce(t *testing.T) {
+	// Verify FST is usable after AddBatch (prefix search works → FST was rebuilt).
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "d1", Text: "kubernetes cluster service", Vector: make([]float32, 384)},
+		{ID: "d2", Text: "kubernetes deployment pod", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	terms, err := e.FSTPrefixSearch("kub", 10)
+	if err != nil {
+		t.Fatalf("FSTPrefixSearch: %v", err)
+	}
+	if len(terms) == 0 {
+		t.Error("expected FST to contain terms with prefix 'kub' after AddBatch")
+	}
+}
+
+func TestEngine_AddBatch_Empty(t *testing.T) {
+	e := newTestEngine()
+	if err := e.AddBatch(context.Background(), nil); err != nil {
+		t.Errorf("AddBatch(nil) should not error, got: %v", err)
+	}
+}
+
+func TestEngine_AddBatch_SearchableAfterSave(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "x1", Text: "golang concurrency channels goroutines", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "batch.db")
+	if err := e.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	e2 := newTestEngine()
+	if err := e2.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	results, err := e2.Search(ctx, "golang goroutines")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == "x1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("AddBatch doc not found after Save/Load round-trip")
+	}
+}
+
 // ─── removeID ─────────────────────────────────────────────────────────────────
 
 func TestRemoveID(t *testing.T) {

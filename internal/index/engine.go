@@ -22,6 +22,13 @@ type SearchResponse struct {
 	Score float64
 }
 
+// BatchDoc is a single entry for AddBatch.
+type BatchDoc struct {
+	ID     string
+	Text   string
+	Vector []float32
+}
+
 // TermStore is implemented by storage backends that maintain a term vocabulary.
 // storage.Engine satisfies this interface — wire it via Engine.SetTermStore()
 // so the storage-layer FST stays in sync with the index vocabulary.
@@ -179,6 +186,20 @@ func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText 
 	}
 	e.rebuildFSTIfNeeded()
 	return nil
+}
+
+// AddBatch indexes all documents in docs and rebuilds the FST exactly once at
+// the end. This is significantly faster than N individual AddWithVector calls
+// because FST rebuild is O(vocab × log vocab) and involves a disk write — doing
+// it once instead of once-per-chunk eliminates the dominant cost during bulk
+// PDF ingestion.
+func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
+	for _, d := range docs {
+		if err := e.addInternal(ctx, d.ID, d.Text, d.Vector); err != nil {
+			return err
+		}
+	}
+	return e.RebuildFST()
 }
 
 // Remove deletes all index entries for originalID.

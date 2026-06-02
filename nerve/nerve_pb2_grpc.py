@@ -49,6 +49,11 @@ class NerveServiceStub:
                 request_serializer=nerve__pb2.ExtractPDFRequest.SerializeToString,
                 response_deserializer=nerve__pb2.ExtractPDFResponse.FromString,
                 _registered_method=True)
+        self.ExtractImage = channel.unary_unary(
+                '/nerve.NerveService/ExtractImage',
+                request_serializer=nerve__pb2.ExtractImageRequest.SerializeToString,
+                response_deserializer=nerve__pb2.ExtractImageResponse.FromString,
+                _registered_method=True)
 
 
 class NerveServiceServicer:
@@ -72,6 +77,12 @@ class NerveServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExtractImage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_NerveServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +100,11 @@ def add_NerveServiceServicer_to_server(servicer, server):
                     servicer.ExtractPDF,
                     request_deserializer=nerve__pb2.ExtractPDFRequest.FromString,
                     response_serializer=nerve__pb2.ExtractPDFResponse.SerializeToString,
+            ),
+            'ExtractImage': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExtractImage,
+                    request_deserializer=nerve__pb2.ExtractImageRequest.FromString,
+                    response_serializer=nerve__pb2.ExtractImageResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +188,33 @@ class NerveService:
             '/nerve.NerveService/ExtractPDF',
             nerve__pb2.ExtractPDFRequest.SerializeToString,
             nerve__pb2.ExtractPDFResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExtractImage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nerve.NerveService/ExtractImage',
+            nerve__pb2.ExtractImageRequest.SerializeToString,
+            nerve__pb2.ExtractImageResponse.FromString,
             options,
             channel_credentials,
             insecure,

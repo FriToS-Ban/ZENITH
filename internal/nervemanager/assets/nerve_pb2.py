@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bnerve.proto\x12\x05nerve\"\x1c\n\x0c\x45mbedRequest\x12\x0c\n\x04text\x18\x01 \x01(\t\"\"\n\rEmbedResponse\x12\x11\n\tembedding\x18\x01 \x03(\x02\"\x1f\n\x0b\x45mbedVector\x12\x10\n\x08\x65lements\x18\x01 \x03(\x02\"\"\n\x11\x42\x61tchEmbedRequest\x12\r\n\x05texts\x18\x01 \x03(\t\"<\n\x12\x42\x61tchEmbedResponse\x12&\n\nembeddings\x18\x01 \x03(\x0b\x32\x12.nerve.EmbedVector\";\n\x11\x45xtractPDFRequest\x12\x11\n\tfile_path\x18\x01 \x01(\t\x12\x13\n\x0b\x64ocument_id\x18\x02 \x01(\t\"\xa7\x01\n\x05\x43hunk\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x13\n\x0bpage_number\x18\x02 \x01(\x05\x12\x13\n\x0b\x63hunk_index\x18\x03 \x01(\x05\x12\x13\n\x0bsource_type\x18\x04 \x01(\t\x12\x11\n\tembedding\x18\x05 \x03(\x02\x12\x0e\n\x06\x62\x62ox_x\x18\x06 \x01(\x02\x12\x0e\n\x06\x62\x62ox_y\x18\x07 \x01(\x02\x12\x0e\n\x06\x62\x62ox_w\x18\x08 \x01(\x02\x12\x0e\n\x06\x62\x62ox_h\x18\t \x01(\x02\"G\n\x12\x45xtractPDFResponse\x12\x1c\n\x06\x63hunks\x18\x01 \x03(\x0b\x32\x0c.nerve.Chunk\x12\x13\n\x0btotal_pages\x18\x02 \x01(\x05\x32\xc8\x01\n\x0cNerveService\x12\x32\n\x05\x45mbed\x12\x13.nerve.EmbedRequest\x1a\x14.nerve.EmbedResponse\x12\x41\n\nEmbedBatch\x12\x18.nerve.BatchEmbedRequest\x1a\x19.nerve.BatchEmbedResponse\x12\x41\n\nExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\x19.nerve.ExtractPDFResponseB6Z4github.com/shramanb113/ZENITH/gen/go/nervepb;nervepbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bnerve.proto\x12\x05nerve\"\x1c\n\x0c\x45mbedRequest\x12\x0c\n\x04text\x18\x01 \x01(\t\"\"\n\rEmbedResponse\x12\x11\n\tembedding\x18\x01 \x03(\x02\"\x1f\n\x0b\x45mbedVector\x12\x10\n\x08\x65lements\x18\x01 \x03(\x02\"\"\n\x11\x42\x61tchEmbedRequest\x12\r\n\x05texts\x18\x01 \x03(\t\"<\n\x12\x42\x61tchEmbedResponse\x12&\n\nembeddings\x18\x01 \x03(\x0b\x32\x12.nerve.EmbedVector\";\n\x11\x45xtractPDFRequest\x12\x11\n\tfile_path\x18\x01 \x01(\t\x12\x13\n\x0b\x64ocument_id\x18\x02 \x01(\t\"\xa7\x01\n\x05\x43hunk\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x13\n\x0bpage_number\x18\x02 \x01(\x05\x12\x13\n\x0b\x63hunk_index\x18\x03 \x01(\x05\x12\x13\n\x0bsource_type\x18\x04 \x01(\t\x12\x11\n\tembedding\x18\x05 \x03(\x02\x12\x0e\n\x06\x62\x62ox_x\x18\x06 \x01(\x02\x12\x0e\n\x06\x62\x62ox_y\x18\x07 \x01(\x02\x12\x0e\n\x06\x62\x62ox_w\x18\x08 \x01(\x02\x12\x0e\n\x06\x62\x62ox_h\x18\t \x01(\x02\"G\n\x12\x45xtractPDFResponse\x12\x1c\n\x06\x63hunks\x18\x01 \x03(\x0b\x32\x0c.nerve.Chunk\x12\x13\n\x0btotal_pages\x18\x02 \x01(\x05\"=\n\x13\x45xtractImageRequest\x12\x11\n\tfile_path\x18\x01 \x01(\t\x12\x13\n\x0b\x64ocument_id\x18\x02 \x01(\t\":\n\x14\x45xtractImageResponse\x12\x0f\n\x07\x63\x61ption\x18\x01 \x01(\t\x12\x11\n\tembedding\x18\x02 \x03(\x02\x32\x91\x02\n\x0cNerveService\x12\x32\n\x05\x45mbed\x12\x13.nerve.EmbedRequest\x1a\x14.nerve.EmbedResponse\x12\x41\n\nEmbedBatch\x12\x18.nerve.BatchEmbedRequest\x1a\x19.nerve.BatchEmbedResponse\x12\x41\n\nExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\x19.nerve.ExtractPDFResponse\x12G\n\x0c\x45xtractImage\x12\x1a.nerve.ExtractImageRequest\x1a\x1b.nerve.ExtractImageResponseB6Z4github.com/shramanb113/ZENITH/gen/go/nervepb;nervepbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -48,6 +48,10 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CHUNK']._serialized_end=448
   _globals['_EXTRACTPDFRESPONSE']._serialized_start=450
   _globals['_EXTRACTPDFRESPONSE']._serialized_end=521
-  _globals['_NERVESERVICE']._serialized_start=524
-  _globals['_NERVESERVICE']._serialized_end=724
+  _globals['_EXTRACTIMAGEREQUEST']._serialized_start=523
+  _globals['_EXTRACTIMAGEREQUEST']._serialized_end=584
+  _globals['_EXTRACTIMAGERESPONSE']._serialized_start=586
+  _globals['_EXTRACTIMAGERESPONSE']._serialized_end=644
+  _globals['_NERVESERVICE']._serialized_start=647
+  _globals['_NERVESERVICE']._serialized_end=920
 # @@protoc_insertion_point(module_scope)

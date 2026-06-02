@@ -81,7 +81,7 @@ func TestManager_extract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dep := range []string{"grpcio", "pdfplumber", "sentence-transformers"} {
+	for _, dep := range []string{"grpcio", "sentence-transformers", "pymupdf"} {
 		if !strings.Contains(string(reqs), dep) {
 			t.Errorf("requirements.txt missing dependency %q", dep)
 		}

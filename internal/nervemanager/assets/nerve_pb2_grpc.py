@@ -44,10 +44,10 @@ class NerveServiceStub:
                 request_serializer=nerve__pb2.BatchEmbedRequest.SerializeToString,
                 response_deserializer=nerve__pb2.BatchEmbedResponse.FromString,
                 _registered_method=True)
-        self.ExtractPDF = channel.unary_unary(
+        self.ExtractPDF = channel.unary_stream(
                 '/nerve.NerveService/ExtractPDF',
                 request_serializer=nerve__pb2.ExtractPDFRequest.SerializeToString,
-                response_deserializer=nerve__pb2.ExtractPDFResponse.FromString,
+                response_deserializer=nerve__pb2.Chunk.FromString,
                 _registered_method=True)
         self.ExtractImage = channel.unary_unary(
                 '/nerve.NerveService/ExtractImage',
@@ -96,10 +96,10 @@ def add_NerveServiceServicer_to_server(servicer, server):
                     request_deserializer=nerve__pb2.BatchEmbedRequest.FromString,
                     response_serializer=nerve__pb2.BatchEmbedResponse.SerializeToString,
             ),
-            'ExtractPDF': grpc.unary_unary_rpc_method_handler(
+            'ExtractPDF': grpc.unary_stream_rpc_method_handler(
                     servicer.ExtractPDF,
                     request_deserializer=nerve__pb2.ExtractPDFRequest.FromString,
-                    response_serializer=nerve__pb2.ExtractPDFResponse.SerializeToString,
+                    response_serializer=nerve__pb2.Chunk.SerializeToString,
             ),
             'ExtractImage': grpc.unary_unary_rpc_method_handler(
                     servicer.ExtractImage,
@@ -182,12 +182,12 @@ class NerveService:
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(
+        return grpc.experimental.unary_stream(
             request,
             target,
             '/nerve.NerveService/ExtractPDF',
             nerve__pb2.ExtractPDFRequest.SerializeToString,
-            nerve__pb2.ExtractPDFResponse.FromString,
+            nerve__pb2.Chunk.FromString,
             options,
             channel_credentials,
             insecure,

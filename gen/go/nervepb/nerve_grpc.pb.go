@@ -31,7 +31,7 @@ const (
 type NerveServiceClient interface {
 	Embed(ctx context.Context, in *EmbedRequest, opts ...grpc.CallOption) (*EmbedResponse, error)
 	EmbedBatch(ctx context.Context, in *BatchEmbedRequest, opts ...grpc.CallOption) (*BatchEmbedResponse, error)
-	ExtractPDF(ctx context.Context, in *ExtractPDFRequest, opts ...grpc.CallOption) (*ExtractPDFResponse, error)
+	ExtractPDF(ctx context.Context, in *ExtractPDFRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Chunk], error)
 	ExtractImage(ctx context.Context, in *ExtractImageRequest, opts ...grpc.CallOption) (*ExtractImageResponse, error)
 }
 
@@ -63,15 +63,24 @@ func (c *nerveServiceClient) EmbedBatch(ctx context.Context, in *BatchEmbedReque
 	return out, nil
 }
 
-func (c *nerveServiceClient) ExtractPDF(ctx context.Context, in *ExtractPDFRequest, opts ...grpc.CallOption) (*ExtractPDFResponse, error) {
+func (c *nerveServiceClient) ExtractPDF(ctx context.Context, in *ExtractPDFRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Chunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExtractPDFResponse)
-	err := c.cc.Invoke(ctx, NerveService_ExtractPDF_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &NerveService_ServiceDesc.Streams[0], NerveService_ExtractPDF_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[ExtractPDFRequest, Chunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NerveService_ExtractPDFClient = grpc.ServerStreamingClient[Chunk]
 
 func (c *nerveServiceClient) ExtractImage(ctx context.Context, in *ExtractImageRequest, opts ...grpc.CallOption) (*ExtractImageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -89,7 +98,7 @@ func (c *nerveServiceClient) ExtractImage(ctx context.Context, in *ExtractImageR
 type NerveServiceServer interface {
 	Embed(context.Context, *EmbedRequest) (*EmbedResponse, error)
 	EmbedBatch(context.Context, *BatchEmbedRequest) (*BatchEmbedResponse, error)
-	ExtractPDF(context.Context, *ExtractPDFRequest) (*ExtractPDFResponse, error)
+	ExtractPDF(*ExtractPDFRequest, grpc.ServerStreamingServer[Chunk]) error
 	ExtractImage(context.Context, *ExtractImageRequest) (*ExtractImageResponse, error)
 	mustEmbedUnimplementedNerveServiceServer()
 }
@@ -107,8 +116,8 @@ func (UnimplementedNerveServiceServer) Embed(context.Context, *EmbedRequest) (*E
 func (UnimplementedNerveServiceServer) EmbedBatch(context.Context, *BatchEmbedRequest) (*BatchEmbedResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method EmbedBatch not implemented")
 }
-func (UnimplementedNerveServiceServer) ExtractPDF(context.Context, *ExtractPDFRequest) (*ExtractPDFResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ExtractPDF not implemented")
+func (UnimplementedNerveServiceServer) ExtractPDF(*ExtractPDFRequest, grpc.ServerStreamingServer[Chunk]) error {
+	return status.Error(codes.Unimplemented, "method ExtractPDF not implemented")
 }
 func (UnimplementedNerveServiceServer) ExtractImage(context.Context, *ExtractImageRequest) (*ExtractImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExtractImage not implemented")
@@ -170,23 +179,16 @@ func _NerveService_EmbedBatch_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _NerveService_ExtractPDF_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExtractPDFRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _NerveService_ExtractPDF_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ExtractPDFRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(NerveServiceServer).ExtractPDF(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: NerveService_ExtractPDF_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NerveServiceServer).ExtractPDF(ctx, req.(*ExtractPDFRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(NerveServiceServer).ExtractPDF(m, &grpc.GenericServerStream[ExtractPDFRequest, Chunk]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NerveService_ExtractPDFServer = grpc.ServerStreamingServer[Chunk]
 
 func _NerveService_ExtractImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExtractImageRequest)
@@ -222,14 +224,16 @@ var NerveService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _NerveService_EmbedBatch_Handler,
 		},
 		{
-			MethodName: "ExtractPDF",
-			Handler:    _NerveService_ExtractPDF_Handler,
-		},
-		{
 			MethodName: "ExtractImage",
 			Handler:    _NerveService_ExtractImage_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ExtractPDF",
+			Handler:       _NerveService_ExtractPDF_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "nerve.proto",
 }

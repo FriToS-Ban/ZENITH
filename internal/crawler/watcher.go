@@ -12,6 +12,8 @@ import (
 	"github.com/shramanb113/ZENITH/internal/activitylog"
 )
 
+const indexWorkers = 4 // concurrent workers for IndexDir
+
 // Indexer is the interface the Watcher calls when a file needs to be indexed
 // or removed. index.Engine satisfies this interface.
 type Indexer interface {
@@ -30,10 +32,16 @@ type FileIndexer interface {
 // remove). All file reads go through ExtractText so every format gets proper
 // text extraction. Rich formats (PDF, images) are dispatched to registered
 // FileIndexers rather than the plain-text path.
+//
+// IndexDir uses a fixed worker pool to parallelise the I/O-bound parts
+// (Nerve gRPC calls for PDFs/images) while the in-memory engine write
+// operations serialise naturally on their own locks.
 type Watcher struct {
 	indexer       Indexer
 	fileIndexers  map[string]FileIndexer
 	onFileIndexed func(path string)
+	skipFile      func(absPath string) bool // return true → skip this file
+	afterFile     func(absPath string)      // called after successful index
 	watcher       *fsnotify.Watcher
 	logger        *activitylog.Logger
 	mu            sync.Mutex
@@ -62,19 +70,60 @@ func NewWatcher(indexer Indexer, logger ...*activitylog.Logger) (*Watcher, error
 	}, nil
 }
 
-// IndexDir performs a one-time, recursive walk of dir, indexing every
-// supported file. It does NOT start watching — use Watch for live updates.
+// IndexDir performs a one-time, recursive walk of dir, indexing every supported
+// file. It uses a worker pool of indexWorkers goroutines so that I/O-heavy
+// operations (Nerve gRPC calls for PDFs/images) overlap rather than serialise.
+// Engine write operations are still serial — the lock inside AddBatch/Add
+// handles concurrency safely.
 func (w *Watcher) IndexDir(ctx context.Context, dir string) error {
-	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	// Collect all supported files first, then dispatch in parallel.
+	var files []string
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			slog.Warn("crawler: walk error", "path", path, "error", err)
 			return nil
 		}
-		if d.IsDir() || !SupportedExt(filepath.Ext(path)) {
-			return nil
+		if !d.IsDir() && SupportedExt(filepath.Ext(path)) {
+			files = append(files, path)
 		}
-		return w.indexFile(ctx, path)
-	})
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+
+	workers := min(indexWorkers, len(files))
+	jobs := make(chan string, len(files))
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+
+	type result struct{ err error }
+	results := make(chan result, len(files))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				results <- result{w.indexFile(ctx, path)}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	for r := range results {
+		if r.err != nil {
+			return r.err
+		}
+	}
+	return nil
 }
 
 // Watch starts watching dir (and all subdirectories discovered during the
@@ -169,6 +218,19 @@ func (w *Watcher) SetOnFileIndexed(fn func(path string)) {
 	w.onFileIndexed = fn
 }
 
+// SetSkipFile registers a predicate called before each file is indexed.
+// If it returns true the file is silently skipped. Use this to wire in
+// content-hash deduplication (fileindex.Index.IsUpToDate).
+func (w *Watcher) SetSkipFile(fn func(absPath string) bool) {
+	w.skipFile = fn
+}
+
+// SetAfterFile registers a callback invoked after each file is successfully
+// indexed. Use this to persist a content-hash record after indexing.
+func (w *Watcher) SetAfterFile(fn func(absPath string)) {
+	w.afterFile = fn
+}
+
 // SimulateEvent injects a synthetic fsnotify event for testing.
 func (w *Watcher) SimulateEvent(ctx context.Context, event fsnotify.Event) {
 	w.handleEvent(ctx, event)
@@ -240,6 +302,12 @@ func (w *Watcher) indexFile(ctx context.Context, path string) error {
 		absPath = path
 	}
 
+	// Content-hash deduplication gate: skip if file is unchanged since last index.
+	if w.skipFile != nil && w.skipFile(absPath) {
+		slog.Debug("crawler: skipping unchanged file", "path", absPath)
+		return nil
+	}
+
 	ext := strings.ToLower(filepath.Ext(path))
 	if fi, ok := w.fileIndexers[ext]; ok {
 		_, ferr := fi.Index(ctx, absPath, absPath)
@@ -251,6 +319,9 @@ func (w *Watcher) indexFile(ctx context.Context, path string) error {
 			w.onFileIndexed(absPath)
 		}
 		w.logger.Log("INDEXED", absPath)
+		if w.afterFile != nil {
+			w.afterFile(absPath)
+		}
 		return nil
 	}
 
@@ -262,5 +333,8 @@ func (w *Watcher) indexFile(ctx context.Context, path string) error {
 		return err
 	}
 	w.logger.Log("INDEXED", absPath)
+	if w.afterFile != nil {
+		w.afterFile(absPath)
+	}
 	return nil
 }

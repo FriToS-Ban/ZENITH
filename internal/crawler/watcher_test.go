@@ -148,3 +148,138 @@ func TestWatcher_HandleRemoveEvent_UnsupportedExt_NoCall(t *testing.T) {
 		t.Errorf("expected no Remove call for unsupported ext, got %d", len(idx.removed))
 	}
 }
+
+// ─── Parallel IndexDir ────────────────────────────────────────────────────────
+
+func TestWatcher_IndexDir_ParallelIndexesAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	const n = 12
+	for i := range n {
+		writeTempFileAt(t, dir, filepath.FromSlash("file_"+string(rune('a'+i))+".txt"), "content")
+	}
+
+	idx := &recordingIndexer{}
+	w, err := crawler.NewWatcher(idx)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+
+	if err := w.IndexDir(context.Background(), dir); err != nil {
+		t.Fatalf("IndexDir: %v", err)
+	}
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.added) != n {
+		t.Errorf("expected %d files indexed, got %d", n, len(idx.added))
+	}
+}
+
+func TestWatcher_IndexDir_ParallelNoDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"alpha.txt", "beta.md", "gamma.go"} {
+		writeTempFileAt(t, dir, name, name)
+	}
+
+	idx := &recordingIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+
+	if err := w.IndexDir(context.Background(), dir); err != nil {
+		t.Fatalf("IndexDir: %v", err)
+	}
+
+	idx.mu.Lock()
+	seen := make(map[string]int)
+	for _, id := range idx.added {
+		seen[id]++
+	}
+	idx.mu.Unlock()
+	for path, count := range seen {
+		if count > 1 {
+			t.Errorf("file %q indexed %d times (want 1)", path, count)
+		}
+	}
+}
+
+// ─── Skip / After hooks (deduplication) ──────────────────────────────────────
+
+func TestWatcher_SkipFile_SkipsMatchingFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeTempFileAt(t, dir, "skip.txt", "content")
+	writeTempFileAt(t, dir, "keep.txt", "content")
+
+	idx := &recordingIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+
+	skipped := filepath.Join(dir, "skip.txt")
+	w.SetSkipFile(func(absPath string) bool {
+		return absPath == skipped
+	})
+
+	if err := w.IndexDir(context.Background(), dir); err != nil {
+		t.Fatalf("IndexDir: %v", err)
+	}
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for _, id := range idx.added {
+		if id == skipped {
+			t.Errorf("skip.txt was indexed despite being skipped")
+		}
+	}
+	if len(idx.added) != 1 {
+		t.Errorf("expected 1 file indexed (keep.txt), got %d", len(idx.added))
+	}
+}
+
+func TestWatcher_AfterFile_CalledAfterIndex(t *testing.T) {
+	dir := t.TempDir()
+	writeTempFileAt(t, dir, "doc.txt", "hello")
+
+	idx := &recordingIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+
+	var mu sync.Mutex
+	var afterCalled []string
+	w.SetAfterFile(func(path string) {
+		mu.Lock()
+		afterCalled = append(afterCalled, path)
+		mu.Unlock()
+	})
+
+	if err := w.IndexDir(context.Background(), dir); err != nil {
+		t.Fatalf("IndexDir: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(afterCalled) != 1 {
+		t.Errorf("expected after-file callback 1 time, got %d", len(afterCalled))
+	}
+}
+
+func TestWatcher_SkipAll_IndexesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeTempFileAt(t, dir, "a.txt", "a")
+	writeTempFileAt(t, dir, "b.txt", "b")
+
+	idx := &recordingIndexer{}
+	w, _ := crawler.NewWatcher(idx)
+	defer w.Close()
+	w.SetSkipFile(func(string) bool { return true }) // skip everything
+
+	if err := w.IndexDir(context.Background(), dir); err != nil {
+		t.Fatalf("IndexDir: %v", err)
+	}
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if len(idx.added) != 0 {
+		t.Errorf("expected 0 files indexed when all skipped, got %d", len(idx.added))
+	}
+}
+

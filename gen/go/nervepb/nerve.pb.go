@@ -601,13 +601,13 @@ const file_nerve_proto_rawDesc = "" +
 	"documentId\"N\n" +
 	"\x14ExtractImageResponse\x12\x18\n" +
 	"\acaption\x18\x01 \x01(\tR\acaption\x12\x1c\n" +
-	"\tembedding\x18\x02 \x03(\x02R\tembedding2\x91\x02\n" +
+	"\tembedding\x18\x02 \x03(\x02R\tembedding2\x86\x02\n" +
 	"\fNerveService\x122\n" +
 	"\x05Embed\x12\x13.nerve.EmbedRequest\x1a\x14.nerve.EmbedResponse\x12A\n" +
 	"\n" +
-	"EmbedBatch\x12\x18.nerve.BatchEmbedRequest\x1a\x19.nerve.BatchEmbedResponse\x12A\n" +
+	"EmbedBatch\x12\x18.nerve.BatchEmbedRequest\x1a\x19.nerve.BatchEmbedResponse\x126\n" +
 	"\n" +
-	"ExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\x19.nerve.ExtractPDFResponse\x12G\n" +
+	"ExtractPDF\x12\x18.nerve.ExtractPDFRequest\x1a\f.nerve.Chunk0\x01\x12G\n" +
 	"\fExtractImage\x12\x1a.nerve.ExtractImageRequest\x1a\x1b.nerve.ExtractImageResponseB6Z4github.com/shramanb113/ZENITH/gen/go/nervepb;nervepbb\x06proto3"
 
 var (
@@ -644,7 +644,7 @@ var file_nerve_proto_depIdxs = []int32{
 	8, // 5: nerve.NerveService.ExtractImage:input_type -> nerve.ExtractImageRequest
 	1, // 6: nerve.NerveService.Embed:output_type -> nerve.EmbedResponse
 	4, // 7: nerve.NerveService.EmbedBatch:output_type -> nerve.BatchEmbedResponse
-	7, // 8: nerve.NerveService.ExtractPDF:output_type -> nerve.ExtractPDFResponse
+	6, // 8: nerve.NerveService.ExtractPDF:output_type -> nerve.Chunk
 	9, // 9: nerve.NerveService.ExtractImage:output_type -> nerve.ExtractImageResponse
 	6, // [6:10] is the sub-list for method output_type
 	2, // [2:6] is the sub-list for method input_type

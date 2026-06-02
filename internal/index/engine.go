@@ -189,11 +189,36 @@ func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText 
 }
 
 // AddBatch indexes all documents in docs and rebuilds the FST exactly once at
-// the end. This is significantly faster than N individual AddWithVector calls
-// because FST rebuild is O(vocab × log vocab) and involves a disk write — doing
-// it once instead of once-per-chunk eliminates the dominant cost during bulk
-// PDF ingestion.
+// the end. It pre-warms word vectors for all unique tokens across the batch
+// before the indexing loop, consolidating gRPC calls to the embedding service
+// into a single upfront phase rather than scattering them through the loop.
 func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
+	// Pre-warm: collect all unique tokens not yet in the word vector store.
+	tokenSet := make(map[string]struct{})
+	for _, d := range docs {
+		for _, t := range e.analyzer.Analyze(d.Text) {
+			if !e.vectors.HasWordVector(t.Term) {
+				tokenSet[t.Term] = struct{}{}
+			}
+		}
+	}
+	if len(tokenSet) > 0 {
+		tokens := make([]string, 0, len(tokenSet))
+		for t := range tokenSet {
+			tokens = append(tokens, t)
+		}
+		const warmBatch = 512
+		for i := 0; i < len(tokens); i += warmBatch {
+			end := i + warmBatch
+			if end > len(tokens) {
+				end = len(tokens)
+			}
+			if _, err := e.embedder.EmbedBatch(ctx, tokens[i:end]); err != nil {
+				slog.Warn("index: word-vector pre-warm failed", "error", err)
+			}
+		}
+	}
+
 	for _, d := range docs {
 		if err := e.addInternal(ctx, d.ID, d.Text, d.Vector); err != nil {
 			return err

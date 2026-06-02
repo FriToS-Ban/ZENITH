@@ -58,9 +58,10 @@ The query goes through the full pipeline:
 			max = len(results)
 		}
 
+		topScore := results[0].Score
 		printDivider()
 		for i, r := range results[:max] {
-			printResult(i+1, r.ID, r.Score)
+			printResult(i+1, r.ID, r.Score, topScore)
 		}
 		printDivider()
 

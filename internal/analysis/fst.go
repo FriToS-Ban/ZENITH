@@ -243,6 +243,10 @@ func buildFSTInto(w interface {
 		if err := b.Close(); err != nil {
 			return nil, fmt.Errorf("fst: close empty builder: %w", err)
 		}
+		// Write serialized bytes to w so BuildToFile gets a valid (non-empty) file.
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			return nil, fmt.Errorf("fst: write empty: %w", err)
+		}
 		fst, err := vellum.Load(buf.Bytes())
 		if err != nil {
 			return nil, fmt.Errorf("fst: load empty: %w", err)

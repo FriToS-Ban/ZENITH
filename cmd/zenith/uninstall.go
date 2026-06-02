@@ -41,23 +41,22 @@ func runUninstall(input io.Reader) error {
 	}
 	nerveDir := filepath.Join(home, ".zenith")
 
+	printHeader("uninstall", "remove binary and nerve sidecar")
+
+	fmt.Printf("  %s  will be removed:\n", yellow("!"))
+	fmt.Printf("       %s  %s\n", cc("✗", cErrCol), muted(binPath+"  (binary)"))
+	fmt.Printf("       %s  %s\n\n", cc("✗", cErrCol), muted(nerveDir+"  (nerve sidecar + venv)"))
+
+	fmt.Printf("  %s  index data is kept:\n", green("✓"))
+	fmt.Printf("       %s\n", muted("./data/wal/   ./data/sst/   zenith.db"))
 	fmt.Println()
-	fmt.Println("  This will remove:")
-	fmt.Printf("    ✗  %s  (binary)\n", binPath)
-	fmt.Printf("    ✗  %s  (nerve sidecar + venv)\n", nerveDir)
-	fmt.Println()
-	fmt.Println("  Your index data is NOT affected:")
-	fmt.Println("    ✓  ./data/wal/   (kept)")
-	fmt.Println("    ✓  ./data/sst/   (kept)")
-	fmt.Println("    ✓  zenith.db     (kept)")
-	fmt.Println()
-	fmt.Print("  Type \"yes\" to continue: ")
+	fmt.Printf("  Type %s to continue: ", cc(`"yes"`, ansiBold+cBrand))
 
 	scanner := bufio.NewScanner(input)
 	scanner.Scan()
 	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
 	if answer != "yes" {
-		fmt.Println("\n  Uninstall cancelled.")
+		fmt.Printf("\n  %s  uninstall cancelled\n\n", muted("·"))
 		return nil
 	}
 	fmt.Println()
@@ -65,29 +64,28 @@ func runUninstall(input io.Reader) error {
 	// Remove nerve dir first (safe on all platforms).
 	if _, err := os.Stat(nerveDir); err == nil {
 		if err := os.RemoveAll(nerveDir); err != nil {
-			fmt.Fprintf(os.Stderr, "  ! Failed to remove %s: %v\n", nerveDir, err)
+			fmt.Fprintf(os.Stderr, "  %s  failed to remove %s: %v\n", yellow("!"), nerveDir, err)
 		} else {
-			fmt.Printf("  ✓  %s removed\n", nerveDir)
+			fmt.Printf("  %s  %s\n", green("✓"), muted(nerveDir+" removed"))
 		}
 	}
 
 	// Remove binary — Windows may deny deletion of a running exe.
 	if binPath != "(could not determine binary path)" {
 		if runtime.GOOS == "windows" {
-			fmt.Println("  !  Binary cannot be removed while running on Windows.")
-			fmt.Printf("     Delete manually: %s\n", binPath)
+			fmt.Printf("  %s  binary cannot be removed while running on Windows\n", yellow("!"))
+			fmt.Printf("       delete manually: %s\n", muted(binPath))
 		} else {
 			if err := os.Remove(binPath); err != nil {
-				fmt.Fprintf(os.Stderr, "  ! Failed to remove binary: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  %s  failed to remove binary: %v\n", yellow("!"), err)
 			} else {
-				fmt.Printf("  ✓  %s removed\n", binPath)
+				fmt.Printf("  %s  %s\n", green("✓"), muted(binPath+" removed"))
 			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("  ✓  Uninstall complete.")
-	fmt.Println()
+	printDivider()
+	printFooter("uninstall complete")
 	return nil
 }
 

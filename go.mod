@@ -1,14 +1,16 @@
 module github.com/shramanb113/ZENITH
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/blevesearch/vellum v1.2.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kljensen/snowball v0.10.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/spf13/cobra v1.10.2
 	github.com/x448/float16 v0.8.4
+	github.com/yalue/onnxruntime_go v1.30.1
 	golang.org/x/net v0.47.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -14,7 +13,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/index"
-	"github.com/shramanb113/ZENITH/internal/nerve"
+	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
@@ -36,7 +35,6 @@ func main() {
 
 	appConfig := config.DefaultConfig()
 
-	//  Storage engine (LSM)
 	storageEng, err := storage.Open(storage.DefaultEngineConfig())
 	if err != nil {
 		slog.Error("Failed to open storage engine", "error", err)
@@ -51,30 +49,19 @@ func main() {
 	alog := activitylog.Open()
 	defer alog.Close()
 
-	//  Nerve gRPC sidecar
-	nerveClient, err := nerve.NewNerveClient(appConfig.NerveGRPCAddr)
-	if err != nil {
-		slog.Error("Failed to connect to Nerve sidecar", "addr", appConfig.NerveGRPCAddr, "error", err)
-		os.Exit(1)
+	// Embedder: use local ONNX model when CGo is available, deterministic otherwise.
+	var emb embedding.Embedder
+	if localEmb, err := localembedder.New(); err == nil {
+		emb, _ = embedding.NewCachingEmbedder(localEmb, 10_000)
+		slog.Info("Local ONNX embedder ready")
+	} else {
+		slog.Warn("Local embedder unavailable, using deterministic", "error", err)
+		emb = embedding.NewDeterministicEmbedder(384)
 	}
-	alog.Log("NERVE", fmt.Sprintf("ready (%s)", appConfig.NerveGRPCAddr))
-	defer func() {
-		if err := nerveClient.Close(); err != nil {
-			slog.Error("Nerve client close failed", "error", err)
-		}
-	}()
 
-	//  Index engine
 	tkz := analysis.NewStandardAnalyzer()
-	rawEmbedder := nerveClient.Embedder()
-	embedder, err := embedding.NewCachingEmbedder(rawEmbedder, 10000)
-	if err != nil {
-		slog.Error("Failed to create embedding cache", "error", err)
-		os.Exit(1)
-	}
-
 	scorer := ranking.NewRRFRanker(0, 0)
-	engine := index.NewEngine(appConfig, embedder, scorer, tkz)
+	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 
 	engine.SetFSTPath("./data/index.fst")
 	engine.SetTermStore(storageEng)
@@ -86,10 +73,8 @@ func main() {
 		alog.Log("LOADED", "zenith.db")
 	}
 
-	//  PDF indexer
-	pdfIndexer := pdf.NewIndexer(nerveClient, engine, alog)
+	pdfIndexer := pdf.NewIndexer(engine, alog)
 
-	//  gRPC server
 	grpcServer := grpc.NewServer()
 	zenithproto.RegisterSearchServiceServer(grpcServer, &server.ZenithServer{
 		Engine:     engine,

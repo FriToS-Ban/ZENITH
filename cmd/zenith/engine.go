@@ -3,12 +3,10 @@ package main
 // engine.go — shared engine construction used by index, search, watch, serve.
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,8 +15,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/config"
 	"github.com/shramanb113/ZENITH/internal/embedding"
 	"github.com/shramanb113/ZENITH/internal/index"
-	"github.com/shramanb113/ZENITH/internal/nerve"
-	"github.com/shramanb113/ZENITH/internal/nervemanager"
+	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
 	"github.com/shramanb113/ZENITH/internal/storage/wal"
@@ -28,15 +25,12 @@ import (
 var cliFlags struct {
 	dbPath      string
 	fstPath     string
-	embedder    string // "auto" | "nerve" | "ollama" | "deterministic"
+	embedder    string // "auto" | "local" | "ollama" | "deterministic"
 	ollamaURL   string
 	ollamaModel string
-	nerveURL    string
 }
 
-// defaultStorageConfig returns a storage config rooted at ~/.zenith/ so WAL,
-// SSTable, and FST files land in a consistent location regardless of the
-// working directory from which zenith is invoked.
+// defaultStorageConfig returns a storage config rooted at ~/.zenith/.
 func defaultStorageConfig() storage.EngineConfig {
 	cfg := storage.DefaultEngineConfig()
 	home, err := os.UserHomeDir()
@@ -55,16 +49,11 @@ func defaultStorageConfig() storage.EngineConfig {
 }
 
 // buildEngine constructs and optionally loads a ready-to-use index.Engine.
-// Also opens the LSM storage engine and wires it as the FST term sink.
-// Returns the engine, the activity logger, and a teardown function to call on process exit.
 func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) {
 	appConfig := config.DefaultConfig()
 
-	// ── Activity logger ───────────────────────────────────────────────────────
 	alog := activitylog.Open()
 
-	// ── Improvement 3: open storage and start embedder concurrently ───────────
-	// The LSM WAL replay and the nerve sidecar start are completely independent.
 	var (
 		storageEng   *storage.Engine
 		storageErr   error
@@ -88,14 +77,13 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 		return nil, nil, nil, storageErr
 	}
 
-	// ── Index engine ──────────────────────────────────────────────────────────
 	tkz := analysis.NewStandardAnalyzer()
 	scorer := ranking.NewRRFRanker(0, 0)
 	engine := index.NewEngine(appConfig, emb, scorer, tkz)
 	engine.SetFSTPath(cliFlags.fstPath)
 	engine.SetTermStore(storageEng)
 
-	_ = embedderName // surfaced by commands via printFooter
+	_ = embedderName
 
 	if load {
 		if err := engine.Load(cliFlags.dbPath); err != nil {
@@ -120,30 +108,11 @@ func buildEngine(load bool) (*index.Engine, *activitylog.Logger, func(), error) 
 	return engine, alog, teardown, nil
 }
 
-// resolveEmbedder picks and constructs the appropriate Embedder based on
-// cliFlags.embedder, printing status lines for auto-start operations.
-// Returns the embedder and a short label for display.
-func resolveEmbedder(appConfig *config.Config, alog *activitylog.Logger) (embedding.Embedder, string) {
+// resolveEmbedder selects the embedder based on cliFlags.embedder.
+func resolveEmbedder(_ *config.Config, alog *activitylog.Logger) (embedding.Embedder, string) {
 	switch cliFlags.embedder {
-	case "auto":
-		return autoEmbedder(appConfig, alog)
-
-	case "nerve":
-		addr := cliFlags.nerveURL
-		if addr == "" {
-			addr = appConfig.NerveGRPCAddr
-		}
-		// Strip any http:// or https:// prefix — nerve is now a gRPC service.
-		addr = strings.TrimPrefix(strings.TrimPrefix(addr, "https://"), "http://")
-		nc, err := nerve.NewNerveClient(addr)
-		if err != nil {
-			return embedding.NewDeterministicEmbedder(384), "deterministic"
-		}
-		cached, err := embedding.NewCachingEmbedder(nc.Embedder(), 10_000)
-		if err != nil {
-			return embedding.NewDeterministicEmbedder(384), "deterministic"
-		}
-		return cached, "nerve"
+	case "auto", "local":
+		return localEmbedderOrFallback(alog)
 
 	case "ollama":
 		base := cliFlags.ollamaURL
@@ -166,102 +135,19 @@ func resolveEmbedder(appConfig *config.Config, alog *activitylog.Logger) (embedd
 	}
 }
 
-// autoEmbedder implements the cascade: nerve → Ollama → deterministic.
-// It starts nerve in the background and waits up to 20 s for it to be ready.
-func autoEmbedder(_ *config.Config, alog *activitylog.Logger) (embedding.Embedder, string) {
-	nm := nervemanager.New()
-
-	fmt.Fprintf(os.Stderr, "\n  %s  starting embedding service...\n", cyan("nerve"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	nerveAddr, status := nm.Start(ctx)
-
-	switch status {
-	case nervemanager.StatusReady:
-		alog.Log("NERVE", fmt.Sprintf("ready (%s)", nerveAddr))
-		printNerveStatus("nerve ready  "+dim("("+nerveAddr+")"), true)
-		if nc, err := nerve.NewNerveClient(nerveAddr); err == nil {
-			if cached, err := embedding.NewCachingEmbedder(nc.Embedder(), 10_000); err == nil {
-				// Improvement 4: fire a background embed to trigger model loading
-				// while the caller continues setup. First real request won't stall.
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-					defer cancel()
-					if _, err := cached.Embed(ctx, "warmup"); err == nil {
-						slog.Info("Nerve models warmed and ready")
-					}
-				}()
-				return cached, "nerve"
-			}
-		}
-
-	case nervemanager.StatusNoPython:
-		alog.Log("NERVE", "failed: python3 not found")
-		printNerveStatus("python3 not found — trying Ollama", false)
-
-	case nervemanager.StatusDepsFailed:
-		alog.Log("NERVE", "failed: pip install failed — see ~/.zenith/nerve/nerve.log")
-		printNerveStatus("pip install failed — check ~/.zenith/nerve/nerve.log", false)
-
-	case nervemanager.StatusLaunchFailed:
-		alog.Log("NERVE", "failed: launch failed — see ~/.zenith/nerve/nerve.log")
-		printNerveStatus("nerve failed to start — check ~/.zenith/nerve/nerve.log", false)
-
-	case nervemanager.StatusTimeout:
-		alog.Log("NERVE", "timeout")
-		printNerveStatus("nerve timed out — falling back", false)
-	}
-
-	// Try Ollama as second choice.
-	if ollamaUp() {
-		base := cliFlags.ollamaURL
-		if base == "" {
-			base = "http://localhost:11434"
-		}
-		model := cliFlags.ollamaModel
-		if model == "" {
-			model = "nomic-embed-text"
-		}
-		printNerveStatus("Ollama ready  "+dim("("+base+")"), true)
-		raw := embedding.NewOllamaEmbedder(base, model, 30*time.Second)
-		if cached, err := embedding.NewCachingEmbedder(raw, 10_000); err == nil {
-			return cached, "ollama"
-		}
-	}
-
-	// Last resort.
-	printNerveStatus("using deterministic embeddings  "+dim("(no semantic search)"), false)
-	return embedding.NewDeterministicEmbedder(384), "deterministic"
-}
-
-// buildNerveClient creates a NerveClient for rich-format indexing (PDF, images).
-// Returns nil only if the address cannot be resolved; the actual connection is
-// lazy so this may succeed even when Nerve isn't running yet.
-func buildNerveClient() *nerve.NerveClient {
-	appConfig := config.DefaultConfig()
-	addr := cliFlags.nerveURL
-	if addr == "" {
-		addr = appConfig.NerveGRPCAddr
-	}
-	addr = strings.TrimPrefix(strings.TrimPrefix(addr, "https://"), "http://")
-	nc, err := nerve.NewNerveClient(addr)
+// localEmbedderOrFallback loads the embedded ONNX model.
+// Falls back to deterministic embeddings if CGo is unavailable or initialisation fails.
+func localEmbedderOrFallback(alog *activitylog.Logger) (embedding.Embedder, string) {
+	emb, err := localembedder.New()
 	if err != nil {
-		return nil
+		alog.Log("EMBEDDER", fmt.Sprintf("local embedder unavailable: %v — using deterministic", err))
+		return embedding.NewDeterministicEmbedder(384), "deterministic"
 	}
-	return nc
-}
-
-// ollamaUp returns true if a local Ollama instance is responding.
-func ollamaUp() bool {
-	base := cliFlags.ollamaURL
-	if base == "" {
-		base = "http://localhost:11434"
+	cached, err := embedding.NewCachingEmbedder(emb, 10_000)
+	if err != nil {
+		return emb, "local"
 	}
-	raw := embedding.NewOllamaEmbedder(base, "nomic-embed-text", 2*time.Second)
-	_, err := raw.Embed(context.Background(), "ping")
-	return err == nil
+	return cached, "local"
 }
 
 func setupLogger() {

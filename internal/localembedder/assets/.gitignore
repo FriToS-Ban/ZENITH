@@ -1,0 +1,4 @@
+model.onnx
+onnxruntime.dll
+libonnxruntime.so
+libonnxruntime.dylib

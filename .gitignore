@@ -1,3 +1,7 @@
 docs/
 zenith.exe
 zenith
+internal/localembedder/assets/model.onnx
+internal/localembedder/assets/onnxruntime.dll
+internal/localembedder/assets/libonnxruntime.so
+internal/localembedder/assets/libonnxruntime.dylib

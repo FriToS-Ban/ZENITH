@@ -4,7 +4,6 @@ package localembedder
 
 import (
 	"fmt"
-	"os"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"

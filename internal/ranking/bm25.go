@@ -32,8 +32,8 @@ type BM25Scorer struct {
 	b  float64 // length normalisation parameter (default 0.75)
 
 	// Per-document state
-	docLengths map[uint32]int            // internalID → term count
-	termFreqs  map[uint32]map[string]int // internalID → term → frequency
+	docLengths map[uint64]int            // internalID → term count
+	termFreqs  map[uint64]map[string]int // internalID → term → frequency
 
 	// Corpus-level state
 	docFreq   map[string]int // term → number of documents containing it
@@ -61,8 +61,8 @@ func NewBM25Scorer(p BM25Params) *BM25Scorer {
 	return &BM25Scorer{
 		k1:         k1,
 		b:          b,
-		docLengths: make(map[uint32]int),
-		termFreqs:  make(map[uint32]map[string]int),
+		docLengths: make(map[uint64]int),
+		termFreqs:  make(map[uint64]map[string]int),
 		docFreq:    make(map[string]int),
 	}
 }
@@ -70,7 +70,7 @@ func NewBM25Scorer(p BM25Params) *BM25Scorer {
 // Index records term frequencies for a document.
 // tokens must already be stemmed/normalised — use analysis.TokenizeString.
 // If the document was previously indexed it is cleanly re-indexed.
-func (s *BM25Scorer) Index(docID uint32, tokens []string) {
+func (s *BM25Scorer) Index(docID uint64, tokens []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -102,7 +102,7 @@ func (s *BM25Scorer) Index(docID uint32, tokens []string) {
 }
 
 // Remove deletes a document from the BM25 index.
-func (s *BM25Scorer) Remove(docID uint32) {
+func (s *BM25Scorer) Remove(docID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -120,6 +120,24 @@ func (s *BM25Scorer) Remove(docID uint32) {
 	s.totalDocs--
 	delete(s.termFreqs, docID)
 	delete(s.docLengths, docID)
+}
+
+// State returns a snapshot of BM25 corpus state for serialisation.
+func (s *BM25Scorer) State() (map[uint64]int, map[uint64]map[string]int, map[string]int, int, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.docLengths, s.termFreqs, s.docFreq, s.totalDocs, s.totalLen
+}
+
+// LoadState restores BM25 corpus state after deserialisation.
+func (s *BM25Scorer) LoadState(docLengths map[uint64]int, termFreqs map[uint64]map[string]int, docFreq map[string]int, totalDocs, totalLen int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.docLengths = docLengths
+	s.termFreqs = termFreqs
+	s.docFreq = docFreq
+	s.totalDocs = totalDocs
+	s.totalLen = totalLen
 }
 
 // avgdl returns the average document length across the corpus.
@@ -140,7 +158,7 @@ func (s *BM25Scorer) idf(term string) float64 {
 }
 
 // scoreDoc computes the BM25 score for a single document against query terms.
-func (s *BM25Scorer) scoreDoc(docID uint32, queryTerms []string) float64 {
+func (s *BM25Scorer) scoreDoc(docID uint64, queryTerms []string) float64 {
 	tf := s.termFreqs[docID]
 	dl := float64(s.docLengths[docID])
 	avgdl := s.avgdl()
@@ -161,7 +179,7 @@ func (s *BM25Scorer) scoreDoc(docID uint32, queryTerms []string) float64 {
 
 // BM25Result is a scored document from a BM25 query.
 type BM25Result struct {
-	DocID uint32
+	DocID uint64
 	Score float64
 }
 
@@ -202,17 +220,17 @@ func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 // This preserves the hybrid nature of the Engine while using BM25 for the
 // lexical component instead of the raw n-gram scoring.
 func (s *BM25Scorer) Score(
-	keywordIDs []uint32,
-	keywordScores map[uint32]float64,
-	vectorIDs []uint32,
-	vectorScores map[uint32]float64,
-	idMapping map[uint32]string,
+	keywordIDs []uint64,
+	keywordScores map[uint64]float64,
+	vectorIDs []uint64,
+	vectorScores map[uint64]float64,
+	idMapping map[uint64]string,
 ) []ScoredResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	// Collect all candidate document IDs
-	seen := make(map[uint32]struct{})
+	seen := make(map[uint64]struct{})
 	for _, id := range keywordIDs {
 		seen[id] = struct{}{}
 	}

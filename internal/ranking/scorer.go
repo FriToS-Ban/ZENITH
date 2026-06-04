@@ -6,10 +6,10 @@ type ScoredResult struct {
 }
 
 type Candidate struct {
-	ID    uint32
+	ID    uint64
 	Score float64
 }
 
 type Scorer interface {
-    Score(keywordIDs []uint32, keywordScores map[uint32]float64, vectorIDs []uint32, vectorScores map[uint32]float64, idMapping map[uint32]string) []ScoredResult
+    Score(keywordIDs []uint64, keywordScores map[uint64]float64, vectorIDs []uint64, vectorScores map[uint64]float64, idMapping map[uint64]string) []ScoredResult
 }

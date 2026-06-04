@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
@@ -54,7 +55,7 @@ type Engine struct {
 	bm25  *ranking.BM25Scorer
 	tfidf *ranking.TFIDFScorer
 
-	idMapping map[uint32]string
+	idMapping map[uint64]string
 
 	// FST term dictionary — rebuilt from globalSeen after every Add() that
 	// introduces new terms. Wired to the analyzer via the FSTWirer interface
@@ -80,7 +81,7 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 		embedder:  emb,
 		scorer:    scr,
 		analyzer:  ana,
-		idMapping: make(map[uint32]string),
+		idMapping: make(map[uint64]string),
 		bm25:      ranking.NewBM25Scorer(ranking.BM25Params{}),
 		tfidf:     ranking.NewTFIDFScorer(),
 		fst:       analysis.NewFSTDictionary(),
@@ -193,6 +194,12 @@ func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText 
 // before the indexing loop, consolidating gRPC calls to the embedding service
 // into a single upfront phase rather than scattering them through the loop.
 func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
+	// Sort by ID for deterministic FST and BM25 state across identical inputs.
+	sorted := make([]BatchDoc, len(docs))
+	copy(sorted, docs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	docs = sorted
+
 	// Pre-warm: collect all unique tokens not yet in the word vector store.
 	tokenSet := make(map[string]struct{})
 	for _, d := range docs {
@@ -230,9 +237,9 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 // Remove deletes all index entries for originalID.
 // Returns nil if the ID was never indexed (idempotent).
 func (e *Engine) Remove(_ context.Context, originalID string) error {
-	h := fnv.New32a()
+	h := fnv.New64a()
 	h.Write([]byte(originalID))
-	internalID := uint32(h.Sum32())
+	internalID := h.Sum64()
 
 	e.inverted.Lock()
 	e.vectors.Lock()
@@ -322,9 +329,9 @@ func (e *Engine) addInternal(ctx context.Context, originalID string, fullText st
 		}
 	}
 
-	h := fnv.New32a()
+	h := fnv.New64a()
 	h.Write([]byte(originalID))
-	internalID := uint32(h.Sum32())
+	internalID := h.Sum64()
 
 	// --- Write locks ---
 	e.inverted.Lock()
@@ -492,9 +499,9 @@ func (e *Engine) expandTokens(rawTokens []string) []string {
 	return expanded
 }
 
-func (e *Engine) lexicalPass(queryTokens []string) (map[uint32]float64, map[uint32]map[string]bool) {
-	keywordScores := make(map[uint32]float64)
-	matchTokens := make(map[uint32]map[string]bool)
+func (e *Engine) lexicalPass(queryTokens []string) (map[uint64]float64, map[uint64]map[string]bool) {
+	keywordScores := make(map[uint64]float64)
+	matchTokens := make(map[uint64]map[string]bool)
 
 	idxData := e.inverted.GetData()
 	idxPhon := e.phonetics.GetData()
@@ -556,8 +563,8 @@ func (e *Engine) lexicalPass(queryTokens []string) (map[uint32]float64, map[uint
 	return keywordScores, matchTokens
 }
 
-func (e *Engine) vectorPass(queryVec []float32) map[uint32]float64 {
-	scores := make(map[uint32]float64)
+func (e *Engine) vectorPass(queryVec []float32) map[uint64]float64 {
+	scores := make(map[uint64]float64)
 	if len(queryVec) == 0 {
 		return scores
 	}
@@ -567,13 +574,13 @@ func (e *Engine) vectorPass(queryVec []float32) map[uint32]float64 {
 	return scores
 }
 
-func (e *Engine) neuralExpand(originalTokens []string, expandedTokens []string) (map[uint32]float64, map[uint32]map[string]bool) {
-	keywordScores := make(map[uint32]float64)
-	matchTokens := make(map[uint32]map[string]bool)
+func (e *Engine) neuralExpand(originalTokens []string, expandedTokens []string) (map[uint64]float64, map[uint64]map[string]bool) {
+	keywordScores := make(map[uint64]float64)
+	matchTokens := make(map[uint64]map[string]bool)
 	idxData := e.inverted.GetData()
 
 	for _, neighbor := range expandedTokens {
-		targets := make(map[uint32]bool)
+		targets := make(map[uint64]bool)
 		if ids, ok := idxData[neighbor]; ok {
 			for _, id := range ids {
 				targets[id] = true
@@ -602,14 +609,14 @@ func (e *Engine) neuralExpand(originalTokens []string, expandedTokens []string) 
 // rankAndFuse builds keyword and vector ID lists and calls the configured Scorer.
 // FIX: no longer mutates the incoming kwScores map — builds a boosted copy instead.
 func (e *Engine) rankAndFuse(
-	kwScores map[uint32]float64,
-	matchToks map[uint32]map[string]bool,
+	kwScores map[uint64]float64,
+	matchToks map[uint64]map[string]bool,
 	qryToks []string,
-	vScores map[uint32]float64,
+	vScores map[uint64]float64,
 ) []SearchResponse {
 
 	// Build boosted copy — never mutate the caller's map.
-	boosted := make(map[uint32]float64, len(kwScores))
+	boosted := make(map[uint64]float64, len(kwScores))
 	for id, score := range kwScores {
 		if score <= 0 {
 			continue
@@ -620,11 +627,11 @@ func (e *Engine) rankAndFuse(
 		}
 	}
 
-	kwIDs := make([]uint32, 0, len(boosted))
+	kwIDs := make([]uint64, 0, len(boosted))
 	for id := range boosted {
 		kwIDs = append(kwIDs, id)
 	}
-	vcIDs := make([]uint32, 0, len(vScores))
+	vcIDs := make([]uint64, 0, len(vScores))
 	for id := range vScores {
 		vcIDs = append(vcIDs, id)
 	}
@@ -726,7 +733,7 @@ func generateEdgeNgrams(token string) []string {
 }
 
 // removeID returns ids with the target removed. Avoids allocation if not found.
-func removeID(ids []uint32, target uint32) []uint32 {
+func removeID(ids []uint64, target uint64) []uint64 {
 	out := ids[:0]
 	for _, id := range ids {
 		if id != target {
@@ -736,7 +743,20 @@ func removeID(ids []uint32, target uint32) []uint32 {
 	return out
 }
 
+// saveFormatMagic and saveFormatVersion identify the gob file format.
+// Bump saveFormatVersion on any breaking struct change so Load returns
+// ErrIncompatibleVersion instead of a confusing gob decode error.
+var saveFormatMagic = [4]byte{'Z', 'N', 'T', 'H'}
+
+const saveFormatVersion uint16 = 2 // v2: uint64 internal IDs + BM25/TF-IDF state
+
+// ErrIncompatibleVersion is returned by Load when the index file was written
+// by a different (incompatible) version of ZENITH.
+var ErrIncompatibleVersion = fmt.Errorf("index: incompatible file version — rebuild the index with the current binary")
+
 // Save serialises all index state to filepath using gob.
+// Writes atomically: data is written to filepath+".tmp" then renamed,
+// so a crash mid-write never produces a corrupted file.
 func (e *Engine) Save(filepath string) error {
 	start := time.Now()
 	e.inverted.RLock()
@@ -748,22 +768,59 @@ func (e *Engine) Save(filepath string) error {
 
 	slog.Info("Saving index state", "path", filepath)
 
-	file, err := os.Create(filepath)
+	tmp := filepath + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+
+	// Write version header before any gob data.
+	if _, err := file.Write(saveFormatMagic[:]); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
+	var vbuf [2]byte
+	vbuf[0] = byte(saveFormatVersion >> 8)
+	vbuf[1] = byte(saveFormatVersion)
+	if _, err := file.Write(vbuf[:]); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
 
 	enc := gob.NewEncoder(file)
+
+	// Retrieve BM25 and TF-IDF corpus state for serialisation.
+	bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen := e.bm25.State()
+	tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs := e.tfidf.State()
+
 	state := []any{
 		e.inverted.GetData(), e.idMapping, e.vectors.GetVectors(),
 		e.inverted.GetTokenCounts(), e.phonetics.GetData(), e.inverted.GetVocabulary(),
 		e.inverted.GetGlobalSeen(), e.vectors.GetWordVectors(), e.inverted.GetDocFragments(),
+		// BM25 corpus state (added in v2)
+		bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen,
+		// TF-IDF corpus state (added in v2)
+		tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs,
 	}
 	for _, s := range state {
 		if err := enc.Encode(s); err != nil {
+			file.Close()
+			os.Remove(tmp)
 			return err
 		}
+	}
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	// Atomic rename — readers always see a complete file.
+	if err := os.Rename(tmp, filepath); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 
 	slog.Info("Index saved", "entries", len(e.inverted.GetData()), "duration", time.Since(start))
@@ -822,6 +879,23 @@ func (e *Engine) load(filepath string) error {
 	}
 	defer f.Close()
 
+	// Read and validate the version header.
+	var magic [4]byte
+	if _, err := f.Read(magic[:]); err != nil {
+		return fmt.Errorf("index: failed to read file header: %w", err)
+	}
+	if magic != saveFormatMagic {
+		return fmt.Errorf("index: not a ZENITH index file (bad magic bytes)")
+	}
+	var vbuf [2]byte
+	if _, err := f.Read(vbuf[:]); err != nil {
+		return fmt.Errorf("index: failed to read version: %w", err)
+	}
+	version := uint16(vbuf[0])<<8 | uint16(vbuf[1])
+	if version != saveFormatVersion {
+		return ErrIncompatibleVersion
+	}
+
 	dec := gob.NewDecoder(f)
 
 	vData := e.inverted.GetData()
@@ -833,16 +907,34 @@ func (e *Engine) load(filepath string) error {
 	vWordVectors := e.vectors.GetWordVectors()
 	vFrag := e.inverted.GetDocFragments()
 
+	// BM25 state receivers
+	var bm25Lengths map[uint64]int
+	var bm25TermFreqs map[uint64]map[string]int
+	var bm25DocFreq map[string]int
+	var bm25TotalDocs, bm25TotalLen int
+
+	// TF-IDF state receivers
+	var tfidfLengths map[uint64]int
+	var tfidfTermFreqs map[uint64]map[string]int
+	var tfidfDocFreq map[string]int
+	var tfidfTotalDocs int
+
 	state := []any{
 		&vData, &e.idMapping, &vVectors,
 		&vToken, &vPhon, &vVocab,
 		&vSeen, &vWordVectors, &vFrag,
+		&bm25Lengths, &bm25TermFreqs, &bm25DocFreq, &bm25TotalDocs, &bm25TotalLen,
+		&tfidfLengths, &tfidfTermFreqs, &tfidfDocFreq, &tfidfTotalDocs,
 	}
 	for _, s := range state {
 		if err := dec.Decode(s); err != nil {
 			return err
 		}
 	}
+
+	// Restore BM25 and TF-IDF corpus state so scores are correct immediately.
+	e.bm25.LoadState(bm25Lengths, bm25TermFreqs, bm25DocFreq, bm25TotalDocs, bm25TotalLen)
+	e.tfidf.LoadState(tfidfLengths, tfidfTermFreqs, tfidfDocFreq, tfidfTotalDocs)
 
 	slog.Info("Index loaded", "docs", len(e.idMapping), "duration", time.Since(start))
 	return nil

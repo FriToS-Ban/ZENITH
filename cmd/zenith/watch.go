@@ -140,14 +140,11 @@ var watchStartCmd = &cobra.Command{
 		}
 		defer w.Close()
 
-		if nc := buildNerveClient(); nc != nil {
-			defer nc.Close()
-			pi := pdf.NewIndexer(nc, engine, alog)
-			w.RegisterFileIndexer(".pdf", pi)
-			ii := imageindexer.NewIndexer(nc, engine, alog)
-			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
-				w.RegisterFileIndexer(ext, ii)
-			}
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -210,14 +207,11 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 		}
 		defer w.Close()
 
-		if nc := buildNerveClient(); nc != nil {
-			defer nc.Close()
-			pi := pdf.NewIndexer(nc, engine, alog)
-			w.RegisterFileIndexer(".pdf", pi)
-			ii := imageindexer.NewIndexer(nc, engine, alog)
-			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
-				w.RegisterFileIndexer(ext, ii)
-			}
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())

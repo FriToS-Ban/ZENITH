@@ -14,13 +14,12 @@ func addEngineFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&cliFlags.fstPath, "fst", zenithDataPath("data/index.fst"), "On-disk FST path")
 	cmd.Flags().StringVar(&cliFlags.embedder, "embedder", "auto",
 		`Embedding backend:
-  auto          Try nerve → Ollama → deterministic (default)
-  nerve         Nerve sidecar — auto-started from ~/.zenith/nerve/
+  auto          Embedded ONNX model (requires CGo build; see docs/DECISIONS.md)
+  local         Alias for auto
   ollama        Local Ollama (needs: ollama serve + ollama pull nomic-embed-text)
   deterministic Hash-based, zero dependencies`)
 	cmd.Flags().StringVar(&cliFlags.ollamaURL, "ollama-url", "http://localhost:11434", "Ollama server URL")
 	cmd.Flags().StringVar(&cliFlags.ollamaModel, "ollama-model", "nomic-embed-text", "Ollama embedding model")
-	cmd.Flags().StringVar(&cliFlags.nerveURL, "nerve-url", "http://127.0.0.1:8000", "Nerve sidecar URL (auto mode ignores this)")
 }
 
 // zenithDataPath returns an absolute path inside the user's ~/.zenith/ directory.

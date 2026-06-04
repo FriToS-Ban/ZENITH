@@ -55,22 +55,18 @@ Supported formats:
 		}
 		defer w.Close()
 
-		// Wire PDF and image indexers via the Nerve sidecar (best-effort).
-		if nc := buildNerveClient(); nc != nil {
-			defer nc.Close()
-			pi := pdf.NewIndexer(nc, engine, alog)
-			w.RegisterFileIndexer(".pdf", pi)
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
 
-			ii := imageindexer.NewIndexer(nc, engine, alog)
-			for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
-				w.RegisterFileIndexer(ext, ii)
-			}
-
-			w.SetOnFileIndexed(func(path string) {
-				n := count.Add(1)
-				printProgress(n, filepath.Base(path))
-			})
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
 		}
+
+		w.SetOnFileIndexed(func(path string) {
+			n := count.Add(1)
+			printProgress(n, filepath.Base(path))
+		})
 
 		// Content-hash deduplication: skip files unchanged since the last run.
 		home, _ := os.UserHomeDir()

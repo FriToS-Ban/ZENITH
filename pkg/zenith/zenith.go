@@ -1,0 +1,420 @@
+// Package zenith provides an embeddable hybrid search index for Go applications.
+//
+// One-line pitch: ZENITH is to search what SQLite is to databases — zero
+// dependencies, embeds in your app, ships in your binary.
+//
+// Usage:
+//
+//	db, err := zenith.Open("search.db")   // or ":memory:" for ephemeral
+//	defer db.Close()
+//	db.Add(ctx, "doc1", "full text content here")
+//	results, _ := db.Search(ctx, "content")
+//
+// All methods are safe for concurrent use by multiple goroutines.
+package zenith
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"unicode"
+
+	"github.com/shramanb113/ZENITH/internal/analysis"
+	"github.com/shramanb113/ZENITH/internal/config"
+	"github.com/shramanb113/ZENITH/internal/embedding"
+	"github.com/shramanb113/ZENITH/internal/index"
+	"github.com/shramanb113/ZENITH/internal/localembedder"
+	"github.com/shramanb113/ZENITH/internal/ranking"
+)
+
+const maxIDBytes = 512
+
+// DB is a handle to an open ZENITH search index.
+// All methods are safe for concurrent use by multiple goroutines.
+// Use Open to obtain a *DB; never construct one directly.
+type DB struct {
+	mu        sync.RWMutex // Add/Delete/Close take Lock; Search takes RLock
+	closed    atomic.Bool
+	closeOnce sync.Once
+
+	engine *index.Engine
+	path   string    // absolute path; empty for :memory:
+	lock   *fileLock // nil for :memory:
+	opts   *options
+}
+
+// Open opens or creates a ZENITH index at path.
+// Pass ":memory:" for an in-memory index that does not persist to disk.
+// Each call to Open(":memory:") creates a new independent database.
+// To share an index between goroutines, pass the same *DB instance.
+func Open(path string, opt ...Option) (*DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("zenith: path must not be empty")
+	}
+
+	o := defaultOptions()
+	for _, fn := range opt {
+		if err := fn(o); err != nil {
+			return nil, err
+		}
+	}
+
+	emb := buildEmbedder(o)
+
+	cfg := config.DefaultConfig()
+	cfg.FuzzyMaxDist = o.fuzzyDistance
+
+	tkz := analysis.NewStandardAnalyzer()
+	scorer := ranking.NewRRFRanker(0, 0)
+	eng := index.NewEngine(cfg, emb, scorer, tkz)
+
+	db := &DB{
+		engine: eng,
+		opts:   o,
+	}
+
+	if path == ":memory:" {
+		return db, nil
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("zenith: %w", err)
+	}
+	db.path = absPath
+
+	fl, err := acquireLock(absPath)
+	if err != nil {
+		return nil, err
+	}
+	db.lock = fl
+
+	if err := eng.Load(absPath); err != nil && !os.IsNotExist(err) {
+		if errors.Is(err, index.ErrIncompatibleVersion) {
+			fl.release()
+			return nil, ErrIncompatibleVersion
+		}
+		fl.release()
+		return nil, fmt.Errorf("zenith: %w", err)
+	}
+
+	return db, nil
+}
+
+// Add indexes a document. Safe to call with the same id to re-index
+// (idempotent — old entries are replaced cleanly).
+func (db *DB) Add(ctx context.Context, id, text string) error {
+	if db == nil {
+		return errors.New("zenith: Add called on nil DB")
+	}
+	if err := validateID(id); err != nil {
+		return err
+	}
+	if err := validateText(text); err != nil {
+		return err
+	}
+	text = sanitiseText(text)
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed.Load() {
+		return ErrClosed
+	}
+
+	if err := db.engine.Add(ctx, id, text); err != nil {
+		return fmt.Errorf("zenith: %w", err)
+	}
+	return nil
+}
+
+// AddBatch indexes all documents in docs in a single FST rebuild pass.
+// More efficient than calling Add in a loop for large inputs.
+// NOT atomic — if AddBatch returns an error, some documents may already
+// be indexed. Documents are processed in sorted ID order.
+func (db *DB) AddBatch(ctx context.Context, docs map[string]string) error {
+	if db == nil {
+		return errors.New("zenith: AddBatch called on nil DB")
+	}
+	if len(docs) == 0 {
+		return nil
+	}
+
+	batch := make([]index.BatchDoc, 0, len(docs))
+	for id, text := range docs {
+		if err := validateID(id); err != nil {
+			return err
+		}
+		if err := validateText(text); err != nil {
+			return err
+		}
+		batch = append(batch, index.BatchDoc{ID: id, Text: sanitiseText(text)})
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed.Load() {
+		return ErrClosed
+	}
+
+	if err := db.engine.AddBatch(ctx, batch); err != nil {
+		return fmt.Errorf("zenith: %w", err)
+	}
+	return nil
+}
+
+// Search executes a hybrid lexical + fuzzy + semantic query.
+// Returns results sorted by score descending. Returns []Result{} (never nil)
+// when no documents match.
+func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) ([]Result, error) {
+	if db == nil {
+		return nil, errors.New("zenith: Search called on nil DB")
+	}
+
+	so := &searchOptions{limit: db.opts.limit}
+	for _, fn := range opts {
+		fn(so)
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed.Load() {
+		return nil, ErrClosed
+	}
+
+	raw, err := db.engine.Search(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("zenith: %w", err)
+	}
+
+	return buildResults(raw, so.limit), nil
+}
+
+// Delete removes a document from the index. Idempotent — deleting a
+// non-existent id returns nil.
+func (db *DB) Delete(ctx context.Context, id string) error {
+	if db == nil {
+		return errors.New("zenith: Delete called on nil DB")
+	}
+	if id == "" {
+		return ErrInvalidID
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed.Load() {
+		return ErrClosed
+	}
+
+	if err := db.engine.Remove(ctx, id); err != nil {
+		return fmt.Errorf("zenith: %w", err)
+	}
+	return nil
+}
+
+// Close flushes and closes the database. Idempotent — safe to call twice.
+// Returns the save error if persistence fails (disk full, permissions, etc.).
+func (db *DB) Close() error {
+	if db == nil {
+		return nil
+	}
+
+	var saveErr error
+	db.closeOnce.Do(func() {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+
+		db.closed.Store(true)
+
+		if db.path != "" {
+			if err := db.engine.Save(db.path); err != nil {
+				saveErr = fmt.Errorf("zenith: %w", err)
+			}
+		}
+		if db.lock != nil {
+			db.lock.release()
+			db.lock = nil
+		}
+	})
+	return saveErr
+}
+
+// --- Input validation ---
+
+func validateID(id string) error {
+	if id == "" {
+		return ErrInvalidID
+	}
+	if len(id) > maxIDBytes {
+		return ErrIDTooLong
+	}
+	for _, r := range id {
+		if r < 0x20 || r == unicode.ReplacementChar {
+			return ErrInvalidID
+		}
+	}
+	if strings.Contains(id, "||") {
+		return ErrInvalidID
+	}
+	return nil
+}
+
+func validateText(text string) error {
+	if strings.TrimSpace(text) == "" {
+		return ErrEmptyDocument
+	}
+	return nil
+}
+
+func sanitiseText(text string) string {
+	text = strings.ToValidUTF8(text, "")
+	text = strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+		return r
+	}, text)
+	return text
+}
+
+// --- Result construction ---
+
+// buildResults normalises, strips chunk IDs, deduplicates, and limits results.
+func buildResults(raw []index.SearchResponse, limit int) []Result {
+	if len(raw) == 0 {
+		return []Result{}
+	}
+
+	// Find max score for normalisation.
+	maxScore := raw[0].Score
+	for _, r := range raw[1:] {
+		if r.Score > maxScore {
+			maxScore = r.Score
+		}
+	}
+
+	type entry struct {
+		score  float64
+		chunks []Chunk
+	}
+	seen := make(map[string]*entry, len(raw))
+
+	for _, r := range raw {
+		norm := normaliseScore(r.Score, maxScore)
+		origID, chunk := parseChunkID(r.ID)
+
+		if e, exists := seen[origID]; exists {
+			if norm > e.score {
+				e.score = norm
+			}
+			if chunk != nil {
+				e.chunks = append(e.chunks, *chunk)
+			}
+		} else {
+			e := &entry{score: norm}
+			if chunk != nil {
+				e.chunks = []Chunk{*chunk}
+			}
+			seen[origID] = e
+		}
+	}
+
+	results := make([]Result, 0, len(seen))
+	for id, e := range seen {
+		results = append(results, Result{
+			ID:     id,
+			Score:  e.score,
+			Chunks: e.chunks,
+		})
+	}
+
+	// Sort: score descending, then ID ascending for determinism on equal scores.
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
+func normaliseScore(score, maxScore float64) float64 {
+	if maxScore <= 0 {
+		return 0
+	}
+	n := score / maxScore
+	if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+		return 0
+	}
+	if n > 1 {
+		return 1
+	}
+	return n
+}
+
+// parseChunkID splits an internal chunk ID into the original document ID
+// and optional Chunk metadata. Chunk IDs use "||" as separator:
+//
+//	"docID||p3||c1||text||10.00,20.00,400.00,15.00"
+//
+// Documents without chunks return the ID unchanged and nil Chunk.
+func parseChunkID(rawID string) (string, *Chunk) {
+	idx := strings.Index(rawID, "||")
+	if idx < 0 {
+		return rawID, nil
+	}
+	origID := rawID[:idx]
+	rest := strings.Split(rawID[idx+2:], "||")
+
+	c := &Chunk{}
+	if len(rest) >= 1 && strings.HasPrefix(rest[0], "p") {
+		c.Page, _ = strconv.Atoi(rest[0][1:])
+	}
+	if len(rest) >= 2 && strings.HasPrefix(rest[1], "c") {
+		c.Index, _ = strconv.Atoi(rest[1][1:])
+	}
+	if len(rest) >= 4 {
+		coords := strings.Split(rest[3], ",")
+		if len(coords) == 4 {
+			v0, _ := strconv.ParseFloat(coords[0], 32)
+			v1, _ := strconv.ParseFloat(coords[1], 32)
+			v2, _ := strconv.ParseFloat(coords[2], 32)
+			v3, _ := strconv.ParseFloat(coords[3], 32)
+			c.BboxX, c.BboxY = float32(v0), float32(v1)
+			c.BboxW, c.BboxH = float32(v2), float32(v3)
+		}
+	}
+	return origID, c
+}
+
+// buildEmbedder constructs the embedder based on options.
+// Falls back to deterministic (hash-based) embeddings if ONNX is unavailable.
+func buildEmbedder(o *options) embedding.Embedder {
+	if o.embedder != nil {
+		return o.embedder
+	}
+	if o.bm25Only {
+		return embedding.NewDeterministicEmbedder(384)
+	}
+	if localEmb, err := localembedder.New(); err == nil {
+		if o.cacheSize > 0 {
+			cached, cacheErr := embedding.NewCachingEmbedder(localEmb, o.cacheSize)
+			if cacheErr == nil {
+				return cached
+			}
+		}
+		return localEmb
+	}
+	return embedding.NewDeterministicEmbedder(384)
+}

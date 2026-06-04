@@ -207,7 +207,48 @@ db, err := zenith.Open("search.db",
 - `grpc-go` — `grpc.Dial(addr, grpc.WithTransportCredentials(...))`
 - `database/sql` — `sql.Open(driver, dsn)`
 
-### 9. Why "SQLite of search" is the right wedge
+### 9. Persistent by default, in-memory on demand
+
+**Decision:** `zenith.Open("search.db")` persists. `zenith.Open(":memory:")` does not. Same function, one argument decides the mode. Directly mirrors SQLite's behaviour.
+
+In-memory mode is not a "lightweight" option — it is a **testing feature**. Every engineering team that matters runs tests with in-memory databases. The ability to write `zenith.Open(":memory:")` in a test signals that this library was designed to be tested. That is a major adoption signal. Libraries you cannot easily test do not get adopted by serious teams.
+
+- Persistent in production — data survives pod restarts in Kubernetes, process crashes, deploys
+- In-memory in tests — fast, isolated, parallel-safe, zero cleanup
+
+No magic paths. No library-managed directories. The caller decides where the data lives. This is the pattern that works in containerised deployments where you control exactly which volumes are mounted.
+
+---
+
+### 10. Two products, one engine, one repository
+
+**Decision:** ZENITH ships as both a CLI tool (`cmd/zenith`) and a Go library (`pkg/zenith`), built on top of the same internal engine (`internal/index/engine.go`).
+
+This is the most misunderstood part of the architecture, so it deserves a clear explanation.
+
+**The CLI** (`go install`) installs a binary called `zenith` into `$GOPATH/bin`. Users run it from their terminal — `zenith index ~/Documents`, `zenith search "query"`. It is a standalone program that lives on your machine.
+
+**The library** (`go get`) adds ZENITH as a dependency to a Go project. It goes into `go.mod`. The developer writes:
+
+```go
+import "github.com/shramanb113/ZENITH/pkg/zenith"
+
+db, _ := zenith.Open("search.db")
+db.Add(ctx, "id", text)
+results, _ := db.Search(ctx, "query")
+```
+
+ZENITH runs **inside their application**, in the same process, with no separate binary. No `zenith` command. No setup. Just a function call.
+
+These are **two different products** sharing the same engine. The CLI is ZENITH the tool. The library is ZENITH the platform — the thing you embed in your app. Same search logic, same embeddings, same storage engine, two entry points.
+
+**The facade pattern:** `pkg/zenith/` is a thin public facade over `internal/index/engine.go`. The facade translates the clean five-method API (`Open`, `Add`, `Search`, `Delete`, `Close`) into the internal engine's operations. Internal types (`BKTree`, `VectorStore`, `InvertedIndex`) never leak through — the public API is fully stable regardless of internal changes.
+
+This is the same pattern used by `database/sql` — the standard library exposes a clean `DB` type while every driver implementation lives behind an interface. Users of `database/sql` have never seen a `btree.Node` or a `page.Header`. That is the goal here.
+
+---
+
+### 11. Why "SQLite of search" is the right wedge
 
 The competitors (Meilisearch, Typesense, Quickwit, Elasticsearch) are all **server processes** — you run them separately and talk to them over HTTP. That makes them:
 - Ops overhead to deploy and maintain
@@ -216,4 +257,18 @@ The competitors (Meilisearch, Typesense, Quickwit, Elasticsearch) are all **serv
 
 ZENITH is **a library** — it compiles into your binary and runs in your process. That is a completely different product category that none of the above compete in. You are not trying to be faster than Meilisearch. You are trying to be in the same relationship to search that SQLite is to databases: the thing you reach for when you want search *inside* your app, not *next to* your app.
 
-This is why the target audience is web app developers and not "search engine users." Web app developers don't want to run Elasticsearch — they want to `import` something and have it work.
+SQLite did not win by out-featuring PostgreSQL. It won by being embeddable, zero-config, and single-file — a category nobody else owned. SQLite is now the most widely deployed database in the world, running in every iPhone, every Android device, every browser.
+
+ZENITH owns the same category for search. The wedge nobody else has claimed: **`go get` and you have production-quality hybrid search in your app, with no infrastructure to manage and nothing to deploy.** That is the pitch. That is the category. And right now, nobody else is in it.
+
+---
+
+## A Note on How This Was Built
+
+ZENITH is a ground-up implementation of the primitives that make search work. Nothing is outsourced to an embedded key-value store or a vector database. Every component — the WAL, the skip-list, the SSTable compactor, the BK-tree, the FST dictionary, the RRF ranker, the ONNX tokenizer, the mean pooling step — was written specifically for this project.
+
+That is not the pragmatic choice. It is the pedagogically honest one. The goal was to understand how search engines work, not to assemble one from parts. If you are reading this to understand the internals, every component has a clear boundary and a reason to exist at that boundary.
+
+The consequence of building from scratch is that the internals are well-understood and improvable. The storage engine can be swapped. The ranker can be tuned. The embedder is an interface. The library API is stable because the internals are isolated behind it.
+
+This is how you build something that lasts.

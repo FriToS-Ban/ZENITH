@@ -1,7 +1,7 @@
 // Package zenith provides an embeddable hybrid search index for Go applications.
 //
-// One-line pitch: ZENITH is to search what SQLite is to databases — zero
-// dependencies, embeds in your app, ships in your binary.
+// ZENITH is to search what SQLite is to databases — zero dependencies, embeds
+// in your app, ships in your binary.
 //
 // Usage:
 //
@@ -41,7 +41,7 @@ const maxIDBytes = 512
 // All methods are safe for concurrent use by multiple goroutines.
 // Use Open to obtain a *DB; never construct one directly.
 type DB struct {
-	mu        sync.RWMutex // Add/Delete/Close take Lock; Search takes RLock
+	mu        sync.RWMutex
 	closed    atomic.Bool
 	closeOnce sync.Once
 
@@ -52,7 +52,7 @@ type DB struct {
 }
 
 // Open opens or creates a ZENITH index at path.
-// Pass ":memory:" for an in-memory index that does not persist to disk.
+// Pass ":memory:" for an in-process index that does not persist to disk.
 // Each call to Open(":memory:") creates a new independent database.
 // To share an index between goroutines, pass the same *DB instance.
 func Open(path string, opt ...Option) (*DB, error) {
@@ -111,14 +111,21 @@ func Open(path string, opt ...Option) (*DB, error) {
 
 // Add indexes a document. Safe to call with the same id to re-index
 // (idempotent — old entries are replaced cleanly).
-func (db *DB) Add(ctx context.Context, id, text string) error {
+func (db *DB) Add(ctx context.Context, id, text string) (err error) {
 	if db == nil {
 		return errors.New("zenith: Add called on nil DB")
 	}
-	if err := validateID(id); err != nil {
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+
+	if err = validateID(id); err != nil {
 		return err
 	}
-	if err := validateText(text); err != nil {
+	if err = validateText(text); err != nil {
 		return err
 	}
 	text = sanitiseText(text)
@@ -129,7 +136,7 @@ func (db *DB) Add(ctx context.Context, id, text string) error {
 		return ErrClosed
 	}
 
-	if err := db.engine.Add(ctx, id, text); err != nil {
+	if err = db.engine.Add(ctx, id, text); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
 	return nil
@@ -138,21 +145,28 @@ func (db *DB) Add(ctx context.Context, id, text string) error {
 // AddBatch indexes all documents in docs in a single FST rebuild pass.
 // More efficient than calling Add in a loop for large inputs.
 // NOT atomic — if AddBatch returns an error, some documents may already
-// be indexed. Documents are processed in sorted ID order.
-func (db *DB) AddBatch(ctx context.Context, docs map[string]string) error {
+// be indexed. Documents are processed in sorted ID order for deterministic results.
+func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) {
 	if db == nil {
 		return errors.New("zenith: AddBatch called on nil DB")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+
 	if len(docs) == 0 {
 		return nil
 	}
 
 	batch := make([]index.BatchDoc, 0, len(docs))
 	for id, text := range docs {
-		if err := validateID(id); err != nil {
+		if err = validateID(id); err != nil {
 			return err
 		}
-		if err := validateText(text); err != nil {
+		if err = validateText(text); err != nil {
 			return err
 		}
 		batch = append(batch, index.BatchDoc{ID: id, Text: sanitiseText(text)})
@@ -164,7 +178,7 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) error {
 		return ErrClosed
 	}
 
-	if err := db.engine.AddBatch(ctx, batch); err != nil {
+	if err = db.engine.AddBatch(ctx, batch); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
 	return nil
@@ -173,10 +187,17 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) error {
 // Search executes a hybrid lexical + fuzzy + semantic query.
 // Returns results sorted by score descending. Returns []Result{} (never nil)
 // when no documents match.
-func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) ([]Result, error) {
+func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) (results []Result, err error) {
 	if db == nil {
 		return nil, errors.New("zenith: Search called on nil DB")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			results = []Result{}
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
 
 	so := &searchOptions{limit: db.opts.limit}
 	for _, fn := range opts {
@@ -199,10 +220,17 @@ func (db *DB) Search(ctx context.Context, query string, opts ...SearchOption) ([
 
 // Delete removes a document from the index. Idempotent — deleting a
 // non-existent id returns nil.
-func (db *DB) Delete(ctx context.Context, id string) error {
+func (db *DB) Delete(ctx context.Context, id string) (err error) {
 	if db == nil {
 		return errors.New("zenith: Delete called on nil DB")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			db.closed.Store(true)
+			err = fmt.Errorf("zenith: internal error: %v", r)
+		}
+	}()
+
 	if id == "" {
 		return ErrInvalidID
 	}
@@ -213,7 +241,7 @@ func (db *DB) Delete(ctx context.Context, id string) error {
 		return ErrClosed
 	}
 
-	if err := db.engine.Remove(ctx, id); err != nil {
+	if err = db.engine.Remove(ctx, id); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
 	return nil
@@ -221,21 +249,27 @@ func (db *DB) Delete(ctx context.Context, id string) error {
 
 // Close flushes and closes the database. Idempotent — safe to call twice.
 // Returns the save error if persistence fails (disk full, permissions, etc.).
-func (db *DB) Close() error {
+func (db *DB) Close() (err error) {
 	if db == nil {
 		return nil
 	}
 
-	var saveErr error
 	db.closeOnce.Do(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				db.closed.Store(true)
+				err = fmt.Errorf("zenith: internal error during close: %v", r)
+			}
+		}()
+
 		db.mu.Lock()
 		defer db.mu.Unlock()
 
 		db.closed.Store(true)
 
 		if db.path != "" {
-			if err := db.engine.Save(db.path); err != nil {
-				saveErr = fmt.Errorf("zenith: %w", err)
+			if saveErr := db.engine.Save(db.path); saveErr != nil {
+				err = fmt.Errorf("zenith: %w", saveErr)
 			}
 		}
 		if db.lock != nil {
@@ -243,7 +277,7 @@ func (db *DB) Close() error {
 			db.lock = nil
 		}
 	})
-	return saveErr
+	return err
 }
 
 // --- Input validation ---
@@ -286,13 +320,11 @@ func sanitiseText(text string) string {
 
 // --- Result construction ---
 
-// buildResults normalises, strips chunk IDs, deduplicates, and limits results.
 func buildResults(raw []index.SearchResponse, limit int) []Result {
 	if len(raw) == 0 {
 		return []Result{}
 	}
 
-	// Find max score for normalisation.
 	maxScore := raw[0].Score
 	for _, r := range raw[1:] {
 		if r.Score > maxScore {
@@ -335,7 +367,6 @@ func buildResults(raw []index.SearchResponse, limit int) []Result {
 		})
 	}
 
-	// Sort: score descending, then ID ascending for determinism on equal scores.
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
@@ -368,7 +399,7 @@ func normaliseScore(score, maxScore float64) float64 {
 //
 //	"docID||p3||c1||text||10.00,20.00,400.00,15.00"
 //
-// Documents without chunks return the ID unchanged and nil Chunk.
+// Documents without chunks return the ID unchanged and a nil Chunk.
 func parseChunkID(rawID string) (string, *Chunk) {
 	idx := strings.Index(rawID, "||")
 	if idx < 0 {
@@ -405,12 +436,13 @@ func buildEmbedder(o *options) embedding.Embedder {
 		return o.embedder
 	}
 	if o.bm25Only {
-		return embedding.NewDeterministicEmbedder(384)
+		// Return nil vectors so the engine skips vector storage and vectorPass
+		// entirely — pure lexical (BM25 + n-gram + fuzzy) search only.
+		return &nullEmbedder{}
 	}
 	if localEmb, err := localembedder.New(); err == nil {
 		if o.cacheSize > 0 {
-			cached, cacheErr := embedding.NewCachingEmbedder(localEmb, o.cacheSize)
-			if cacheErr == nil {
+			if cached, err := embedding.NewCachingEmbedder(localEmb, o.cacheSize); err == nil {
 				return cached
 			}
 		}
@@ -418,3 +450,17 @@ func buildEmbedder(o *options) embedding.Embedder {
 	}
 	return embedding.NewDeterministicEmbedder(384)
 }
+
+// nullEmbedder returns nil vectors, causing the engine to skip vector indexing
+// and vector search. Used by WithBM25Only() to guarantee pure lexical mode.
+type nullEmbedder struct{}
+
+func (n *nullEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	return nil, nil
+}
+
+func (n *nullEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	return make([][]float32, len(texts)), nil
+}
+
+func (n *nullEmbedder) Dimensions() int { return 0 }

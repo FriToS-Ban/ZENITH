@@ -59,23 +59,23 @@ func NewRRFRanker(k float64, topN int) *RRFRanker {
 //
 //  5. cmp.Compare used for the string tie-breaker — cleaner, same semantics.
 func (r *RRFRanker) Score(
-	keywordIDs []uint32,
-	keywordScores map[uint32]float64,
-	vectorIDs []uint32,
-	vectorScores map[uint32]float64,
-	idMapping map[uint32]string,
+	keywordIDs []uint64,
+	keywordScores map[uint64]float64,
+	vectorIDs []uint64,
+	vectorScores map[uint64]float64,
+	idMapping map[uint64]string,
 ) []ScoredResult {
 
 	// --- 1. Sort copies, not the caller's slices ---
 
-	kwSorted := make([]uint32, len(keywordIDs))
+	kwSorted := make([]uint64, len(keywordIDs))
 	copy(kwSorted, keywordIDs)
-	vcSorted := make([]uint32, len(vectorIDs))
+	vcSorted := make([]uint64, len(vectorIDs))
 	copy(vcSorted, vectorIDs)
 
 	// Keyword list: sort by keyword score desc,
 	// tie-break by vector score desc, then alphabetically.
-	slices.SortFunc(kwSorted, func(a, b uint32) int {
+	slices.SortFunc(kwSorted, func(a, b uint64) int {
 		if d := cmpFloat(keywordScores[b], keywordScores[a]); d != 0 {
 			return d
 		}
@@ -86,7 +86,7 @@ func (r *RRFRanker) Score(
 	})
 
 	// Vector list: sort by vector score desc, tie-break alphabetically.
-	slices.SortFunc(vcSorted, func(a, b uint32) int {
+	slices.SortFunc(vcSorted, func(a, b uint64) int {
 		if d := cmpFloat(vectorScores[b], vectorScores[a]); d != 0 {
 			return d
 		}
@@ -97,7 +97,7 @@ func (r *RRFRanker) Score(
 
 	// Pre-size to the union of both lists to avoid rehashing.
 	capacity := len(kwSorted) + len(vcSorted)
-	rrfScores := make(map[uint32]float64, capacity)
+	rrfScores := make(map[uint64]float64, capacity)
 
 	for rank, id := range kwSorted {
 		rrfScores[id] += 1.0 / (r.k + float64(rank+1))

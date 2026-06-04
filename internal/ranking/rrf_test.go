@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func makeMapping(ids ...string) ([]uint32, map[uint32]float64, map[uint32]string) {
-	mapping := make(map[uint32]string, len(ids))
-	idList := make([]uint32, len(ids))
-	scores := make(map[uint32]float64, len(ids))
+func makeMapping(ids ...string) ([]uint64, map[uint64]float64, map[uint64]string) {
+	mapping := make(map[uint64]string, len(ids))
+	idList := make([]uint64, len(ids))
+	scores := make(map[uint64]float64, len(ids))
 	for i, id := range ids {
-		uid := uint32(i + 1)
+		uid := uint64(i + 1)
 		idList[i] = uid
 		mapping[uid] = id
 		scores[uid] = float64(len(ids) - i) // highest score for first element
@@ -39,11 +39,11 @@ func TestRRFScore_DocumentInBothLists(t *testing.T) {
 
 	// shared_doc appears in both — its RRF score = 1/(60+1) + 1/(60+1)
 	// unique_doc appears only in keyword list at rank 1 — score = 1/(60+1)
-	kwIDs := []uint32{1, 2}
-	kwScores := map[uint32]float64{1: 100, 2: 50}
-	vcIDs := []uint32{2}
-	vcScores := map[uint32]float64{2: 80}
-	mapping := map[uint32]string{1: "unique_doc", 2: "shared_doc"}
+	kwIDs := []uint64{1, 2}
+	kwScores := map[uint64]float64{1: 100, 2: 50}
+	vcIDs := []uint64{2}
+	vcScores := map[uint64]float64{2: 80}
+	mapping := map[uint64]string{1: "unique_doc", 2: "shared_doc"}
 
 	results := ranker.Score(kwIDs, kwScores, vcIDs, vcScores, mapping)
 
@@ -63,14 +63,14 @@ func TestRRFScore_DocumentInBothLists(t *testing.T) {
 
 func TestRRFScore_DoesNotMutateInputSlices(t *testing.T) {
 	ranker := NewRRFRanker(60, 0)
-	kwIDs := []uint32{3, 1, 2}
-	vcIDs := []uint32{2, 3, 1}
-	kwScores := map[uint32]float64{1: 10, 2: 20, 3: 30}
-	vcScores := map[uint32]float64{1: 5, 2: 15, 3: 25}
-	mapping := map[uint32]string{1: "a", 2: "b", 3: "c"}
+	kwIDs := []uint64{3, 1, 2}
+	vcIDs := []uint64{2, 3, 1}
+	kwScores := map[uint64]float64{1: 10, 2: 20, 3: 30}
+	vcScores := map[uint64]float64{1: 5, 2: 15, 3: 25}
+	mapping := map[uint64]string{1: "a", 2: "b", 3: "c"}
 
-	kwCopy := make([]uint32, len(kwIDs))
-	vcCopy := make([]uint32, len(vcIDs))
+	kwCopy := make([]uint64, len(kwIDs))
+	vcCopy := make([]uint64, len(vcIDs))
 	copy(kwCopy, kwIDs)
 	copy(vcCopy, vcIDs)
 
@@ -98,9 +98,9 @@ func TestRRFScore_EmptyInputs(t *testing.T) {
 
 func TestRRFScore_OnlyKeyword(t *testing.T) {
 	ranker := NewRRFRanker(60, 0)
-	kwIDs := []uint32{1, 2}
-	kwScores := map[uint32]float64{1: 50, 2: 30}
-	mapping := map[uint32]string{1: "alpha", 2: "beta"}
+	kwIDs := []uint64{1, 2}
+	kwScores := map[uint64]float64{1: 50, 2: 30}
+	mapping := map[uint64]string{1: "alpha", 2: "beta"}
 	results := ranker.Score(kwIDs, kwScores, nil, nil, mapping)
 	if len(results) == 0 {
 		t.Fatal("expected results from keyword-only input")
@@ -114,13 +114,13 @@ func TestRRFScore_OnlyKeyword(t *testing.T) {
 
 func TestRRFScore_TopNCap(t *testing.T) {
 	ranker := NewRRFRanker(60, 3) // topN = 3
-	ids := make([]uint32, 10)
-	scores := make(map[uint32]float64, 10)
-	mapping := make(map[uint32]string, 10)
+	ids := make([]uint64, 10)
+	scores := make(map[uint64]float64, 10)
+	mapping := make(map[uint64]string, 10)
 	for i := range 10 {
-		ids[i] = uint32(i + 1)
-		scores[uint32(i+1)] = float64(10 - i)
-		mapping[uint32(i+1)] = "doc"
+		ids[i] = uint64(i + 1)
+		scores[uint64(i+1)] = float64(10 - i)
+		mapping[uint64(i+1)] = "doc"
 	}
 	results := ranker.Score(ids, scores, nil, nil, mapping)
 	if len(results) > 3 {
@@ -130,9 +130,9 @@ func TestRRFScore_TopNCap(t *testing.T) {
 
 func TestRRFScore_DeterministicOrder(t *testing.T) {
 	ranker := NewRRFRanker(60, 0)
-	kwIDs := []uint32{1, 2}
-	kwScores := map[uint32]float64{1: 100, 2: 100}
-	mapping := map[uint32]string{1: "z_doc", 2: "a_doc"}
+	kwIDs := []uint64{1, 2}
+	kwScores := map[uint64]float64{1: 100, 2: 100}
+	mapping := map[uint64]string{1: "z_doc", 2: "a_doc"}
 
 	r1 := ranker.Score(kwIDs, kwScores, nil, nil, mapping)
 	r2 := ranker.Score(kwIDs, kwScores, nil, nil, mapping)

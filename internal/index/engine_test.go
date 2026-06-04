@@ -505,15 +505,15 @@ func TestEngine_AddBatch_SearchableAfterSave(t *testing.T) {
 
 func TestRemoveID(t *testing.T) {
 	cases := []struct {
-		ids    []uint32
-		target uint32
-		want   []uint32
+		ids    []uint64
+		target uint64
+		want   []uint64
 	}{
-		{[]uint32{1, 2, 3}, 2, []uint32{1, 3}},
-		{[]uint32{1, 2, 3}, 1, []uint32{2, 3}},
-		{[]uint32{1, 2, 3}, 3, []uint32{1, 2}},
-		{[]uint32{1, 2, 3}, 9, []uint32{1, 2, 3}}, // not found
-		{[]uint32{}, 1, []uint32{}},
+		{[]uint64{1, 2, 3}, 2, []uint64{1, 3}},
+		{[]uint64{1, 2, 3}, 1, []uint64{2, 3}},
+		{[]uint64{1, 2, 3}, 3, []uint64{1, 2}},
+		{[]uint64{1, 2, 3}, 9, []uint64{1, 2, 3}}, // not found
+		{[]uint64{}, 1, []uint64{}},
 		{nil, 1, nil},
 	}
 	for _, c := range cases {

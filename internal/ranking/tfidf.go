@@ -28,8 +28,8 @@ type TFIDFScorer struct {
 	mu sync.RWMutex
 
 	// Per-document state
-	termFreqs  map[uint32]map[string]int // internalID → term → count
-	docLengths map[uint32]int            // internalID → total term count
+	termFreqs  map[uint64]map[string]int // internalID → term → count
+	docLengths map[uint64]int            // internalID → total term count
 
 	// Corpus-level state
 	docFreq   map[string]int // term → number of docs containing it
@@ -39,8 +39,8 @@ type TFIDFScorer struct {
 // NewTFIDFScorer creates an empty TFIDFScorer.
 func NewTFIDFScorer() *TFIDFScorer {
 	return &TFIDFScorer{
-		termFreqs:  make(map[uint32]map[string]int),
-		docLengths: make(map[uint32]int),
+		termFreqs:  make(map[uint64]map[string]int),
+		docLengths: make(map[uint64]int),
 		docFreq:    make(map[string]int),
 	}
 }
@@ -48,7 +48,7 @@ func NewTFIDFScorer() *TFIDFScorer {
 // Index records term frequencies for docID.
 // tokens must already be stemmed/normalised — use analysis.TokenizeString.
 // Re-indexing an existing docID cleanly replaces its old stats.
-func (s *TFIDFScorer) Index(docID uint32, tokens []string) {
+func (s *TFIDFScorer) Index(docID uint64, tokens []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -78,7 +78,7 @@ func (s *TFIDFScorer) Index(docID uint32, tokens []string) {
 }
 
 // Remove deletes a document from the TF-IDF index.
-func (s *TFIDFScorer) Remove(docID uint32) {
+func (s *TFIDFScorer) Remove(docID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -97,9 +97,26 @@ func (s *TFIDFScorer) Remove(docID uint32) {
 	delete(s.docLengths, docID)
 }
 
+// State returns a snapshot of TF-IDF corpus state for serialisation.
+func (s *TFIDFScorer) State() (map[uint64]int, map[uint64]map[string]int, map[string]int, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.docLengths, s.termFreqs, s.docFreq, s.totalDocs
+}
+
+// LoadState restores TF-IDF corpus state after deserialisation.
+func (s *TFIDFScorer) LoadState(docLengths map[uint64]int, termFreqs map[uint64]map[string]int, docFreq map[string]int, totalDocs int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.docLengths = docLengths
+	s.termFreqs = termFreqs
+	s.docFreq = docFreq
+	s.totalDocs = totalDocs
+}
+
 // tf computes the term frequency of term in docID.
 // TF = count(term in doc) / total_terms_in_doc — exactly as seroost computes it.
-func (s *TFIDFScorer) tf(term string, docID uint32) float64 {
+func (s *TFIDFScorer) tf(term string, docID uint64) float64 {
 	dl := s.docLengths[docID]
 	if dl == 0 {
 		return 0
@@ -120,7 +137,7 @@ func (s *TFIDFScorer) idf(term string) float64 {
 
 // TFIDFResult is a scored document from a TF-IDF query.
 type TFIDFResult struct {
-	DocID uint32
+	DocID uint64
 	Score float64
 }
 
@@ -162,16 +179,16 @@ func (s *TFIDFScorer) Query(queryTerms []string) []TFIDFResult {
 //
 // This mirrors BM25Scorer.Score so both can be swapped transparently.
 func (s *TFIDFScorer) Score(
-	keywordIDs []uint32,
-	keywordScores map[uint32]float64,
-	vectorIDs []uint32,
-	vectorScores map[uint32]float64,
-	idMapping map[uint32]string,
+	keywordIDs []uint64,
+	keywordScores map[uint64]float64,
+	vectorIDs []uint64,
+	vectorScores map[uint64]float64,
+	idMapping map[uint64]string,
 ) []ScoredResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	seen := make(map[uint32]struct{})
+	seen := make(map[uint64]struct{})
 	for _, id := range keywordIDs {
 		seen[id] = struct{}{}
 	}

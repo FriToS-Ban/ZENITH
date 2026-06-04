@@ -17,29 +17,23 @@ var rootCmd = &cobra.Command{
 
 Engine architecture:
   [Crawler] → [Analyzer] → [Embedder] → [LSM Storage]
-  (fsnotify)   (FST+BKTree) (Ollama/OpenAI) (WAL→MemTable→SSTable)
+  (fsnotify)   (FST+BKTree) (ONNX/local) (WAL→MemTable→SSTable)
 
 Hybrid ranking:
   Lexical  BM25 + TF-IDF + Porter stemming + edge n-grams
   Fuzzy    BK-tree Levenshtein (O(log n))
-  Semantic vector cosine via local Ollama embeddings
+  Semantic vector cosine via embedded ONNX model
   Fusion   Reciprocal Rank Fusion (RRF)`,
 }
 
 func init() {
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
-	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		switch cmd.CommandPath() {
-		case "zenith setup", "zenith version", "zenith update",
-			"zenith uninstall", "zenith watch uninstall":
-			return nil
-		}
-		return checkSetupDone()
-	}
+	// No setup gate — the embedded model requires no installation step.
 }
 
 func main() {
+	autoMigrate() // one-time cleanup of Python nerve artifacts on upgrade
 	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd, setupCmd)
 
 	err := rootCmd.Execute()

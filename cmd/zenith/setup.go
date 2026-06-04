@@ -1,184 +1,145 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
 
-	"github.com/shramanb113/ZENITH/internal/nerve"
-	"github.com/shramanb113/ZENITH/internal/nervemanager"
 	"github.com/spf13/cobra"
 )
 
-// errSetupRequired is returned by checkSetupDone so main() can distinguish it
-// from real command errors and avoid printing a duplicate message.
+// errSetupRequired is kept as a named error for backward compatibility with
+// any existing code that checks errors.Is(err, errSetupRequired).
 var errSetupRequired = errors.New("setup required")
 
-// setupSentinelPath is a var so tests can redirect it to a temp directory.
-var setupSentinelPath = func() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "setup_ok"
-	}
-	return filepath.Join(home, ".zenith", "setup_ok")
-}
-
-func isSetupDone() bool {
-	want := nervemanager.New().RequirementsHash()
-	got, err := os.ReadFile(setupSentinelPath())
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(got)) == want
-}
-
-func writeSetupSentinel() error {
-	p := setupSentinelPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, []byte(nervemanager.New().RequirementsHash()), 0o644)
-}
-
-// checkSetupDone prints a hard error and returns errSetupRequired when setup
-// has not completed. Wired into rootCmd.PersistentPreRunE.
-func checkSetupDone() error {
-	if isSetupDone() {
-		return nil
-	}
-	fmt.Fprintf(os.Stderr, "\n  %s  ZENITH is not set up yet. Run:\n\n       zenith setup\n\n  This downloads the embedding models and verifies the search engine.\n  No other commands will work until setup completes successfully.\n\n", bold("✗"))
-	return errSetupRequired
-}
-
 var setupFlags struct {
-	force bool
+	clean bool
 }
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "First-run setup: install Python packages and download embedding models",
-	Long: `Prepares ZENITH for use by running four steps:
+	Short: "Migration helper for users upgrading from a Python-sidecar version",
+	Long: `ZENITH now uses an embedded model — no Python or setup step required.
 
-  [1/4] Create the Python virtual environment
-  [2/4] Install packages via uv (torch CPU + dependencies, ~600 MB)
-  [3/4] Start the nerve gRPC server and verify it responds
-  [4/4] Load embedding models (downloads weights on first run — up to 20 min)
+If you are upgrading from an older version, run:
 
-Run this once after 'go install'. All other zenith commands are blocked until
-setup completes successfully.
+  zenith setup --clean
 
-Use --force to kill any running nerve process, wipe the venv, and start fresh.`,
+This removes leftover Python files from ~/.zenith/nerve/ and recovers disk space.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSetup()
 	},
 }
 
 func init() {
-	setupCmd.Flags().BoolVar(&setupFlags.force, "force", false,
-		"Kill running nerve, wipe the venv, and redo everything from scratch")
+	setupCmd.Flags().BoolVar(&setupFlags.clean, "clean", false,
+		"Remove leftover Python sidecar files from a previous installation")
 }
 
 func runSetup() error {
-	printHeader("setup", "first-run initialisation")
+	printHeader("setup", "ZENITH is ready — no setup required")
 
-	nm := nervemanager.New()
-
-	if setupFlags.force {
-		fmt.Printf("  %s  --force: stopping nerve and clearing previous setup state\n\n", yellow("!"))
-		_ = nm.Kill()
-		time.Sleep(500 * time.Millisecond)
-		_ = os.Remove(setupSentinelPath())
-		nm.ResetSetup()
+	if setupFlags.clean {
+		runMigration(true)
+		return nil
 	}
 
-	// ── [1/4] Python environment ──────────────────────────────────────────────
-	printStep(1, 4, "Python environment")
-	if err := nm.Extract(); err != nil {
-		fmt.Printf("    %s  failed to extract nerve files: %v\n\n", yellow("!"), err)
-		return fmt.Errorf("setup [1/4] failed: %w", err)
-	}
-	python, err := nm.FindPython()
-	if err != nil {
-		fmt.Printf("    %s  Python 3 not found\n\n", yellow("!"))
-		fmt.Printf("       Install Python 3.10+ from https://www.python.org/downloads/\n\n")
-		return fmt.Errorf("setup [1/4] failed: %w", err)
-	}
-	fmt.Printf("    %s  %s\n", green("✓"), muted(python))
-
-	// ── [2/4] Installing packages ─────────────────────────────────────────────
-	printStep(2, 4, "Installing packages")
-	fmt.Printf("       %s\n", dim("(torch CPU + dependencies, ~600 MB — may take several minutes)"))
-	if err := nm.EnsureDeps(python); err != nil {
-		fmt.Printf("    %s  package install failed — see output above\n\n", yellow("!"))
-		return fmt.Errorf("setup [2/4] failed: %w", err)
-	}
-	fmt.Printf("    %s  %s\n", green("✓"), muted("packages installed"))
-
-	// ── [3/4] Start nerve ─────────────────────────────────────────────────────
-	printStep(3, 4, "Starting nerve")
-
-	// Kill and relaunch if nerve is already running with stale code.
-	quickCtx, quickCancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	alreadyUp := nm.WaitReady(quickCtx, 400*time.Millisecond)
-	quickCancel()
-
-	if alreadyUp && !nm.NerveCodeUpToDate() {
-		fmt.Printf("       %s  nerve running with stale code — restarting\n", muted("·"))
-		_ = nm.Kill()
-		time.Sleep(500 * time.Millisecond)
-		alreadyUp = false
-	}
-
-	if !alreadyUp {
-		if err := nm.Launch(); err != nil {
-			fmt.Printf("    %s  failed to launch nerve: %v\n\n", yellow("!"), err)
-			return fmt.Errorf("setup [3/4] failed: %w", err)
-		}
-	}
-
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer waitCancel()
-	if !nm.WaitReady(waitCtx, 30*time.Second) {
-		fmt.Printf("    %s  nerve did not start within 30 s\n", yellow("!"))
-		fmt.Printf("       check %s\n\n", muted(nm.LogPath()))
-		return fmt.Errorf("setup [3/4] failed: nerve timeout")
-	}
-	nm.MarkNerveVersionOK()
-	fmt.Printf("    %s  %s\n", green("✓"), muted("nerve listening on "+nm.Addr()))
-
-	// ── [4/4] Model warm-up ───────────────────────────────────────────────────
-	printStep(4, 4, "Warming up models")
-	fmt.Printf("       %s\n", dim("(loading torch + downloading weights on first run — up to 20 min)"))
-
-	nc, err := nerve.NewNerveClient(nm.Addr())
-	if err != nil {
-		fmt.Printf("    %s  could not dial nerve: %v\n\n", yellow("!"), err)
-		return fmt.Errorf("setup [4/4] failed: %w", err)
-	}
-	defer nc.Close()
-
-	warmCtx, warmCancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	defer warmCancel()
-	vec, err := nc.Embedder().Embed(warmCtx, "zenith model warmup")
-	if err != nil || len(vec) == 0 {
-		fmt.Printf("    %s  model warm-up failed: %v\n", yellow("!"), err)
-		fmt.Printf("       check %s\n\n", muted(nm.LogPath()))
-		return fmt.Errorf("setup [4/4] failed: %w", err)
-	}
-	fmt.Printf("    %s  %s\n", green("✓"), muted("models ready"))
-
-	// ── Write sentinel ────────────────────────────────────────────────────────
-	if err := writeSetupSentinel(); err != nil {
-		fmt.Printf("  %s  could not write sentinel: %v\n", yellow("!"), err)
-		return fmt.Errorf("setup: could not write sentinel: %w", err)
-	}
-
-	// ── Summary ───────────────────────────────────────────────────────────────
+	fmt.Printf("  %s  Embedded model loaded automatically — nothing to install.\n\n", green("✓"))
+	fmt.Printf("  %s  To remove leftover Python files from an older version:\n", muted("·"))
+	fmt.Printf("       zenith setup --clean\n\n")
 	printDivider()
 	printFooter("ZENITH is ready", "run 'zenith index <directory>' to get started")
 	return nil
+}
+
+// runMigration cleans up Python nerve artifacts from a previous installation.
+// When verbose is true, progress is printed to stdout.
+// Called automatically on first run when ~/.zenith/nerve/ exists, and manually
+// via 'zenith setup --clean'.
+func runMigration(verbose bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	nerveDir := filepath.Join(home, ".zenith", "nerve")
+	if _, err := os.Stat(nerveDir); os.IsNotExist(err) {
+		if verbose {
+			fmt.Printf("  %s  No Python sidecar files found — nothing to clean.\n\n", green("✓"))
+		}
+		return
+	}
+
+	// Kill any running nerve process using the saved PID file.
+	pidFile := filepath.Join(nerveDir, "nerve.pid")
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Kill()
+			}
+		}
+	}
+
+	size := dirSizeBytes(nerveDir)
+
+	if err := os.RemoveAll(nerveDir); err != nil && verbose {
+		fmt.Printf("  %s  Could not remove %s: %v\n", yellow("!"), nerveDir, err)
+	} else if verbose {
+		fmt.Printf("  %s  Removed %s (%s freed)\n", green("✓"), nerveDir, formatBytes(size))
+	}
+
+	// Remove the old setup sentinel (keyed to nerve's hash, now meaningless).
+	_ = os.Remove(filepath.Join(home, ".zenith", "setup_ok"))
+
+	// Write migration sentinel so auto-migration runs exactly once.
+	_ = os.WriteFile(filepath.Join(home, ".zenith", "migrated_v2"), []byte("done"), 0o644)
+}
+
+// autoMigrate runs a silent one-time cleanup when the new binary finds leftover
+// Python nerve artifacts from a previous installation. Called from main() before
+// any command executes.
+func autoMigrate() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	// Already migrated — skip.
+	if _, err := os.Stat(filepath.Join(home, ".zenith", "migrated_v2")); err == nil {
+		return
+	}
+	// No nerve dir present — mark done and return.
+	nerveDir := filepath.Join(home, ".zenith", "nerve")
+	if _, err := os.Stat(nerveDir); os.IsNotExist(err) {
+		_ = os.WriteFile(filepath.Join(home, ".zenith", "migrated_v2"), []byte("done"), 0o644)
+		return
+	}
+	// Measure size BEFORE removal.
+	size := dirSizeBytes(nerveDir)
+	runMigration(false)
+	fmt.Fprintf(os.Stderr, "\n  %s  Migrated to native Go (%s freed)\n\n",
+		green("✓"), formatBytes(size))
+}
+
+func dirSizeBytes(path string) int64 {
+	var size int64
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.0f MB", float64(b)/(1<<20))
+	default:
+		return fmt.Sprintf("%d KB", b>>10)
+	}
 }

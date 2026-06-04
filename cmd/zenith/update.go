@@ -29,8 +29,8 @@ var updateCmd = &cobra.Command{
 	Long: `Checks GitHub for a newer release and runs:
   go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 
-Requires go in PATH. Index data and the nerve sidecar are unaffected.
-The nerve sidecar is refreshed automatically on next run.`,
+Requires go in PATH. Index data is preserved. Python files from previous
+versions are cleaned up automatically on first run of the new binary.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runUpdate()
 	},

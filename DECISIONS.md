@@ -263,6 +263,277 @@ ZENITH owns the same category for search. The wedge nobody else has claimed: **`
 
 ---
 
+## Library Engineering: Edge Cases, Failure Modes, and Breaking Criteria
+
+This section documents every edge case, failure mode, and silent breaking criterion identified during the design of `pkg/zenith`. It exists because these issues will surface in production and in technical interviews — understanding *why* each one breaks and *how* it is fixed is more valuable than just knowing the fix.
+
+---
+
+### Critical: FNV-32 Hash Collision (Data Corruption at Scale)
+
+The internal engine stores every document under a `uint32` FNV-32a hash of its string ID:
+
+```go
+h := fnv.New32a()
+h.Write([]byte(originalID))
+internalID := uint32(h.Sum32()) // 2^32 possible values
+```
+
+Birthday problem: at **92,000 documents** there is a 1% chance of at least one collision. A collision means document B silently overwrites document A — A's text disappears from search results with no error, no warning, and no way to detect it from the outside.
+
+**Fix:** replace `uint32` internal IDs with the full string key in all internal maps. Eliminates collisions entirely. This must be fixed before the library ships.
+
+---
+
+### Critical: Gob Corruption on Crash (Atomic Write)
+
+The engine saves its entire state to a single gob file. A mid-write SIGKILL (OOM kill, power loss, `kill -9`) leaves a partially-written file — valid gob header, truncated body. Next `Open` fails with a confusing decode error and the user believes their data is lost.
+
+**Fix:** write to `zenith.db.tmp`, then `os.Rename` atomically. Rename is atomic at the filesystem level on all major operating systems — the reader always sees either the old complete file or the new complete file, never a partial write.
+
+---
+
+### Critical: No Format Version Header (Silent Upgrade Breakage)
+
+The gob file has no version marker. When the library is upgraded and an internal struct changes, `Open` fails with `gob: type mismatch in decoder: want struct type ...` — a message that means nothing to the user.
+
+**Fix:** prepend a 4-byte magic (`ZNTH`) and 2-byte version number to every saved file. On `Open`, check the magic and version. Unknown version returns `ErrIncompatibleVersion` with a human-readable message and migration instructions.
+
+---
+
+### Critical: BM25 Statistics Not Serialised (Wrong Scores After Restart)
+
+BM25 scoring requires corpus-level statistics: total document count, average document length, per-term document frequency. These are maintained in memory. If gob serialisation omits them (unexported fields are skipped by gob), every `Open` starts BM25 from zero. Loaded documents have no term frequency records — scores are meaningless until every document is re-indexed from scratch.
+
+**Fix:** explicitly include BM25 scorer state in the serialised output. Add a round-trip test: save, load, verify BM25 scores are identical before and after.
+
+---
+
+### Critical: Chunk IDs Leaking Through the Public API
+
+PDF and image indexing creates internal chunk IDs in the format `"docID||p3||c1||text||10.00,20.00,400.00,15.00"`. Without a library facade layer, these internal IDs surface to the caller who passed `"report.pdf"` and expected `"report.pdf"` back. They must parse `||`-separated implementation details to recover their original document ID.
+
+**Fix:** the library layer strips chunk suffixes before returning results. The caller always gets their original document ID back. Page and position information is returned in a separate `Chunk` struct on the `Result` type for callers who need it (e.g. PDF highlighting).
+
+---
+
+### Input Validation: Empty and Whitespace-Only Values
+
+```go
+db.Add(ctx, "", "content")      // → ErrInvalidID: id must not be empty
+db.Add(ctx, "id", "")           // → ErrEmptyDocument
+db.Add(ctx, "id", "   \t\n ")   // → ErrEmptyDocument (whitespace-only = empty)
+```
+
+Silently accepting empty documents pollutes the index with zero-vector entries that can never be meaningfully retrieved. Named sentinel errors (`ErrInvalidID`, `ErrEmptyDocument`) let callers handle them with `errors.Is`.
+
+---
+
+### Input Validation: String Length Overflows
+
+- **IDs** are stored in the `idMapping` — unbounded IDs are a memory attack surface. Maximum: 512 bytes. Beyond that: `ErrIDTooLong`.
+- **Document text** has no length limit for lexical indexing. But the tokeniser truncates at 256 tokens (~1,000 characters) for semantic embedding. This is silent data loss for semantic search on long documents. The godoc must state explicitly: *"Semantic search covers only the first ~1,000 characters. Lexical search covers the full document."*
+- **Queries** are similarly truncated at the tokeniser level.
+
+---
+
+### Input Validation: The NULL Value Misconception
+
+Go has no null but it has nil, zero values, and empty strings. Every exported method behaves consistently:
+
+- `Search` with no matches → `[]Result{}` (empty slice), **never** `nil`. Returning `nil` instead of `[]Result{}` breaks JSON serialisation and surprises callers expecting `len(results) == 0`.
+- `AddBatch` with nil or empty map → no-op, no error.
+- All slice return values: allocated and empty, not nil.
+
+---
+
+### Input Validation: Invalid UTF-8 and Null Bytes
+
+- **IDs** must be valid UTF-8 with no null bytes or control characters (0x00–0x1F). These corrupt log output, break JSON serialisation of results, and cause subtle downstream bugs. Reject at input: `ErrInvalidID`.
+- **Document text** with invalid UTF-8 or null bytes: sanitise silently via `strings.ToValidUTF8(text, "")` before indexing. Real-world documents (scraped HTML, OCR output, legacy encodings) frequently contain garbage bytes — rejecting them would break too many valid use cases.
+
+---
+
+### Input Validation: ID Characters Colliding with Internal Separators
+
+The internal chunk ID format uses `||` as a separator. A user ID of `"my||doc"` silently corrupts the internal format. Fix: validate that IDs do not contain `||`. Return `ErrInvalidID` with a message explaining the restriction. Leaky abstractions must be exposed as explicit errors, not silent corruption.
+
+---
+
+### Input Validation: Option Values Out of Range
+
+```go
+zenith.WithLimit(-5)          // → ErrInvalidOption: limit must be positive
+zenith.WithFuzzyDistance(-1)  // → ErrInvalidOption
+zenith.WithFuzzyDistance(100) // → clamped to max (5) with a log warning — not an error
+zenith.WithCacheSize(0)       // → valid, disables cache
+```
+
+Negative values are always errors. Absurdly large `FuzzyDistance` values are clamped — they would cause O(n) BK-tree scans that hang the caller.
+
+---
+
+### Output Sanitisation: Score Normalisation
+
+Raw RRF scores are reciprocal sums — not bounded, not intuitive, not comparable across different result sets. Two guarantees for library consumers:
+
+1. All scores are normalised to `[0.0, 1.0]` by dividing by the maximum score in the result set.
+2. NaN and Inf scores (from zero-magnitude vectors in dot product calculations) are clamped to `0.0`. **Never return NaN or Inf to the caller.**
+
+```go
+type Result struct {
+    ID    string
+    Score float64 // always in [0.0, 1.0], never NaN, never Inf
+}
+```
+
+---
+
+### Output Sanitisation: Result Deduplication
+
+The hybrid pipeline (lexical + fuzzy + vector) can produce the same document ID from multiple passes. RRF accumulates scores across passes by design — but a merge bug could produce duplicate IDs in the final slice. Before returning, deduplicate by ID. The caller should never see the same ID twice in one result set.
+
+---
+
+### Output Sanitisation: Deterministic Ordering for Equal Scores
+
+When two results have identical normalised scores, the ordering must be deterministic across process restarts. Sort by ID lexicographically as a tiebreaker. Without this, any test that checks result ordering is flaky, and production result ordering changes unpredictably between deployments.
+
+---
+
+### Output Sanitisation: Error Message Cleansing
+
+Internal errors contain file paths, goroutine IDs, and internal type names that are meaningless or alarming to end users:
+
+```
+// Raw (bad): "index: fst build: open /home/user/.zenith/data/terms.fst: permission denied"
+// Wrapped (good): "zenith: failed to update search index (check write permissions)"
+```
+
+All errors returned through the public API are wrapped with `fmt.Errorf("zenith: %w", err)` — recognisably from ZENITH, still unwrappable via `errors.Is`/`errors.As`, and stripped of internal paths.
+
+---
+
+### Concurrency: Use-After-Close
+
+Every method guards with an atomic `closed` flag:
+
+```go
+func (db *DB) Add(ctx context.Context, id, text string) error {
+    if db.closed.Load() {
+        return ErrClosed
+    }
+    // ...
+}
+```
+
+Calling any method after `Close` returns `ErrClosed`. Never panics.
+
+---
+
+### Concurrency: Double-Close Safety
+
+`Close` uses `sync.Once` — second and subsequent calls return `nil` immediately. `defer db.Close()` is always safe even if the caller also closes explicitly on an error path.
+
+---
+
+### Concurrency: Close Racing with Add/Search
+
+`Close` atomically sets `closed = true` before acquiring the write lock. If `Add` is in progress: `Add` completes, `Close` then acquires the write lock, saves, tears down. No half-written documents. No torn reads. Subsequent `Add` calls return `ErrClosed`.
+
+---
+
+### Concurrency: Panic Recovery
+
+If the internal engine panics (a bug — should never happen, but can), a `recover()` wrapper in each public method catches it, marks the DB as permanently closed, and returns a structured error. A panicking `DB` becomes `ErrClosed` rather than corrupting the caller's goroutine stack.
+
+---
+
+### Concurrency: ONNX Session Pool Exhaustion
+
+The ONNX session pool holds up to `runtime.NumCPU()` concurrent sessions. If all sessions are busy, new goroutines block on a channel acquire. The internal context is passed to this wait — if the context is cancelled (including by `Close`), the waiting goroutine unblocks and returns `ErrClosed` rather than hanging forever.
+
+---
+
+### Concurrency: Nil-Safe Methods
+
+```go
+func (db *DB) Add(ctx context.Context, id, text string) error {
+    if db == nil {
+        return errors.New("zenith: Add called on nil DB")
+    }
+    // ...
+}
+```
+
+Every exported method handles `db == nil` as a clean error. No nil pointer panics from caller mistakes.
+
+---
+
+### Concurrency: AddBatch Non-Determinism
+
+`AddBatch` accepts `map[string]string`. Go map iteration is deliberately randomised — two identical calls produce documents indexed in different orders, causing different FST structures and different fuzzy match behaviour across runs. Fix: sort document IDs before processing. Deterministic input → deterministic index → reproducible tests.
+
+---
+
+### Operational: Goroutine Leak from Warmup Embed
+
+The engine fires a detached goroutine on startup to warm the ONNX model. If `Close` is called before warmup finishes (common in tests), the goroutine outlives the `DB`, holds a reference to the ONNX session, and prevents GC. Over many test runs this accumulates into a memory leak. Fix: the warmup goroutine uses the DB's internal context — `Close` cancels it immediately.
+
+---
+
+### Operational: WAL Overhead for Library Use
+
+The storage engine's WAL was designed for a long-running server that needs crash recovery. A library used in short-lived web request handlers pays WAL write overhead on every `Add` with no benefit — a request handler crashing mid-index just means that request fails, not that the whole index is corrupted. Fix: `WithNoWAL()` option. In-memory mode disables WAL automatically.
+
+---
+
+### Operational: Memory Scaling in `:memory:` Mode
+
+```
+1M documents × 384 dims × 2 bytes (float16) = 768 MB vectors alone
+```
+
+Plus postings lists, BK-tree nodes, ID mappings. No eviction — everything stays in RAM. GC pressure grows with index size, causing latency spikes in web handlers. Users who use `:memory:` in production without understanding this will hit OOM kills. Godoc must document the memory formula. A `WithMemoryLimit(bytes int64)` option returns `ErrIndexFull` when exceeded rather than silently growing until OOM.
+
+---
+
+### Operational: Two `:memory:` Opens Are Independent
+
+```go
+db1, _ := zenith.Open(":memory:")
+db2, _ := zenith.Open(":memory:")
+// db1 and db2 share NO state — completely independent databases
+```
+
+Users from Redis or SQLite shared-memory backgrounds expect `:memory:` to be a shared in-process singleton. It is not. Must be the first line of the `:memory:` godoc: *"Each call to Open(\":memory:\") creates a new independent database. To share an index between goroutines, pass the same \*DB instance."*
+
+---
+
+### Operational: File Locking (Two Processes, Same File)
+
+Two processes calling `Open("search.db")` simultaneously would both read the file, both write back modified versions, and silently corrupt each other's work. Fix: acquire an exclusive advisory lock on `path + ".lock"` at `Open` time. Second caller gets `ErrLocked` immediately. Two `*DB` instances in the same process pointing at the same path are detected via an in-process `sync.Map` registry — also returns `ErrLocked`.
+
+---
+
+### Operational: Silent Quality Degradation — Vector/Inverted Desync
+
+Embedding is non-fatal by design. If the ONNX model fails on a particular document, it is indexed lexically but not semantically. This document appears in keyword and fuzzy results but never in pure semantic search. Worse: if the embedder recovers later, the population permanently splits into vectored and vectorless documents with no way to detect the split. Fix: expose `SemanticScore float64` on `Result` (0.0 means no vector). Let callers detect and handle the split.
+
+---
+
+### Operational: Float16 Magnitude Cache Desync
+
+Vectors are stored as float16, magnitudes cached separately as float32. When a document is re-indexed, if the magnitude cache is not updated atomically with the vector, cosine similarity scores for that document are computed against a stale magnitude — producing silent ranking inversions. Fix: update vector and magnitude atomically under the write lock, in the same struct.
+
+---
+
+### Operational: Synonym Expansion Cycle
+
+If the synonym map contains a bidirectional entry (A→B, B→A — possible from a loaded thesaurus), expansion loops until stack overflow. Fix: expansion tracks visited terms in a `map[string]bool`. Maximum expansion depth capped at 10 terms.
+
+---
+
 ## A Note on How This Was Built
 
 ZENITH is a ground-up implementation of the primitives that make search work. Nothing is outsourced to an embedded key-value store or a vector database. Every component — the WAL, the skip-list, the SSTable compactor, the BK-tree, the FST dictionary, the RRF ranker, the ONNX tokenizer, the mean pooling step — was written specifically for this project.

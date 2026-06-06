@@ -229,12 +229,12 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 	}
 
 	if db.docWAL != nil {
-		for _, d := range batch {
-			if _, err = db.docWAL.Append(ctx, &wal.Record{
-				Op: wal.OpTypePut, Key: []byte(d.ID), Value: []byte(d.Text),
-			}); err != nil {
-				return fmt.Errorf("zenith: wal: %w", err)
-			}
+		walRecs := make([]*wal.Record, len(batch))
+		for i, d := range batch {
+			walRecs[i] = &wal.Record{Op: wal.OpTypePut, Key: []byte(d.ID), Value: []byte(d.Text)}
+		}
+		if _, err = db.docWAL.AppendBatch(ctx, walRecs); err != nil {
+			return fmt.Errorf("zenith: wal: %w", err)
 		}
 	}
 

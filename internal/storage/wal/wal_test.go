@@ -229,6 +229,96 @@ func TestEncodeRecord_InvalidOp(t *testing.T) {
 	}
 }
 
+// ─── AppendBatch ──────────────────────────────────────────────────────────────
+
+func TestWALAppendBatch_RecordsRecovered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "batch.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records := []*Record{
+		{Op: OpTypePut, Key: []byte("doc1"), Value: []byte("hello world")},
+		{Op: OpTypePut, Key: []byte("doc2"), Value: []byte("foo bar")},
+		{Op: OpTypeDelete, Key: []byte("doc3")},
+	}
+	seqs, err := w.AppendBatch(ctx, records)
+	if err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if len(seqs) != len(records) {
+		t.Fatalf("expected %d seqs, got %d", len(records), len(seqs))
+	}
+	// Sequences must be monotonically increasing.
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Errorf("seqs not monotonic: seqs[%d]=%d <= seqs[%d]=%d", i, seqs[i], i-1, seqs[i-1])
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — all three records must be recovered.
+	w2, recovered, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	if len(recovered) != len(records) {
+		t.Fatalf("expected %d recovered records, got %d", len(records), len(recovered))
+	}
+	for i, r := range recovered {
+		if string(r.Key) != string(records[i].Key) {
+			t.Errorf("record[%d] key: got %q, want %q", i, r.Key, records[i].Key)
+		}
+		if r.Op != records[i].Op {
+			t.Errorf("record[%d] op: got %d, want %d", i, r.Op, records[i].Op)
+		}
+	}
+}
+
+func TestWALAppendBatch_SingleFsync(t *testing.T) {
+	// AppendBatch on an empty slice is a no-op.
+	w, _ := openTestWAL(t)
+	seqs, err := w.AppendBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("AppendBatch(nil): %v", err)
+	}
+	if len(seqs) != 0 {
+		t.Errorf("expected 0 seqs for nil batch, got %d", len(seqs))
+	}
+}
+
+func TestWALAppendBatch_SequencesContinueAfterSingleAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mixed.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Single append first.
+	seq1, _ := w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("a"), Value: []byte("1")})
+
+	// Batch must continue the sequence.
+	seqs, err := w.AppendBatch(ctx, []*Record{
+		{Op: OpTypePut, Key: []byte("b"), Value: []byte("2")},
+		{Op: OpTypePut, Key: []byte("c"), Value: []byte("3")},
+	})
+	if err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if seqs[0] <= seq1 {
+		t.Errorf("batch seq %d should be > single seq %d", seqs[0], seq1)
+	}
+	_ = w.Close()
+}
+
 // ─── Reset ────────────────────────────────────────────────────────────────────
 
 func TestWALReset_EmptiesFile(t *testing.T) {

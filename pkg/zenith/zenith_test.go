@@ -844,6 +844,51 @@ func TestSearch_AfterDelete_ResultsUpdated(t *testing.T) {
 	}
 }
 
+// ─── AddBatch WAL single-fsync ───────────────────────────────────────────────
+
+func TestAddBatch_WALRecoveredAfterCrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "batch_crash.db")
+
+	// Phase 1: clean baseline.
+	db1, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Phase 2: inject a batch of WAL records simulating a crash mid-AddBatch.
+	injectWALRecords(t, path, map[string]string{
+		"batch1": "first document in batch",
+		"batch2": "second document in batch",
+		"batch3": "third document in batch",
+	})
+
+	// Phase 3: reopen — all three must be recovered.
+	db2, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open after crash: %v", err)
+	}
+	defer db2.Close()
+
+	for _, id := range []string{"batch1", "batch2", "batch3"} {
+		results, err := db2.Search(bgCtx(), id)
+		if err != nil {
+			t.Fatalf("Search %s: %v", id, err)
+		}
+		found := false
+		for _, r := range results {
+			if r.ID == id {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s not recovered from WAL after simulated batch crash", id)
+		}
+	}
+}
+
 // ─── WAL crash-recovery (persistent mode) ────────────────────────────────────
 
 // injectWALRecords writes WAL records directly to path+".wal", simulating

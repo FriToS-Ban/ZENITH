@@ -228,3 +228,71 @@ func TestEncodeRecord_InvalidOp(t *testing.T) {
 		t.Error("expected error for invalid op type")
 	}
 }
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+
+func TestWALReset_EmptiesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reset.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		_, _ = w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("k"), Value: []byte{byte(i)}})
+	}
+
+	if err := w.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close after Reset: %v", err)
+	}
+
+	// Reopen — must have zero records.
+	w2, records, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatalf("reopen after Reset: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	if len(records) != 0 {
+		t.Fatalf("expected 0 records after Reset, got %d", len(records))
+	}
+}
+
+func TestWALReset_AcceptsWritesAfterReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reset_write.wal")
+	ctx := context.Background()
+
+	w, _, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("before"), Value: []byte("1")})
+
+	if err := w.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	// Write a new record after Reset — must succeed.
+	if _, err := w.Append(ctx, &Record{Op: OpTypePut, Key: []byte("after"), Value: []byte("2")}); err != nil {
+		t.Fatalf("Append after Reset: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen — must see only the post-Reset record.
+	w2, records, err := OpenWAL(path, WALConfig{SyncMode: SyncAlways})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record after Reset+Append, got %d", len(records))
+	}
+	if string(records[0].Key) != "after" {
+		t.Errorf("expected key 'after', got %q", records[0].Key)
+	}
+}

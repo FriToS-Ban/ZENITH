@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/ranking"
 	"github.com/shramanb113/ZENITH/internal/server"
 	storage "github.com/shramanb113/ZENITH/internal/storage"
+	"github.com/shramanb113/ZENITH/internal/storage/wal"
 	"google.golang.org/grpc"
 )
 
@@ -73,6 +75,24 @@ func main() {
 		alog.Log("LOADED", "zenith.db")
 	}
 
+	// Replay WAL delta — documents indexed since the last gob checkpoint.
+	// The journal is NOT set yet, so these Add/Remove calls do not re-journal.
+	replayCtx := context.Background()
+	for _, r := range storageEng.Records() {
+		switch r.Op {
+		case wal.OpTypePut:
+			if err := engine.Add(replayCtx, string(r.Key), string(r.Value)); err != nil {
+				slog.Warn("WAL replay: re-index failed", "id", string(r.Key), "error", err)
+			}
+		case wal.OpTypeDelete:
+			if err := engine.Remove(replayCtx, string(r.Key)); err != nil {
+				slog.Warn("WAL replay: remove failed", "id", string(r.Key), "error", err)
+			}
+		}
+	}
+	// Connect the journal — all future mutations are durably recorded first.
+	engine.SetDocumentJournal(storageEng)
+
 	pdfIndexer := pdf.NewIndexer(engine, alog)
 
 	grpcServer := grpc.NewServer()
@@ -101,5 +121,9 @@ func main() {
 	} else {
 		slog.Info("Index saved. Goodbye.")
 		alog.Log("SAVED", "zenith.db")
+		// Checkpoint the WAL — the gob is now authoritative; clear the delta journal.
+		if err := storageEng.Checkpoint(); err != nil {
+			slog.Error("WAL checkpoint failed", "error", err)
+		}
 	}
 }

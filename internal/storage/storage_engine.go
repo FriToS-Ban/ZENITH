@@ -61,6 +61,11 @@ type Engine struct {
 	vocabMu sync.RWMutex
 	vocab   map[string]struct{}
 
+	// journalRecords holds WAL records recovered on Open.
+	// The server reads these once to replay document mutations into the index
+	// engine after loading a gob snapshot. Cleared by Checkpoint.
+	journalRecords []wal.Record
+
 	// Lifecycle
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -147,12 +152,13 @@ func Open(cfg EngineConfig) (*Engine, error) {
 	slog.Info("WAL replayed", "records", len(records))
 
 	e := &Engine{
-		cfg:     cfg,
-		walFile: walFile,
-		active:  mt,
-		fst:     analysis.NewFSTDictionary(),
-		vocab:   make(map[string]struct{}),
-		closed:  make(chan struct{}),
+		cfg:            cfg,
+		walFile:        walFile,
+		active:         mt,
+		fst:            analysis.NewFSTDictionary(),
+		vocab:          make(map[string]struct{}),
+		closed:         make(chan struct{}),
+		journalRecords: records,
 	}
 
 	e.committer = sstable.NewGroupCommitter(cfg.CommitWindow, e.nextSSTPath)
@@ -469,4 +475,18 @@ func (e *Engine) isClosed() bool {
 func (e *Engine) nextSSTPath() string {
 	n := e.sstCounter.Add(1)
 	return filepath.Join(e.cfg.SSTDir, fmt.Sprintf("%010d.sst", n))
+}
+
+// ── Journal recovery ──────────────────────────────────────────────────────────
+
+// Records returns WAL records recovered during Open. The server reads these
+// once to replay document mutations into the index engine after loading a gob
+// snapshot. Cleared by Checkpoint.
+func (e *Engine) Records() []wal.Record { return e.journalRecords }
+
+// Checkpoint is called after a successful gob save. It resets the WAL so the
+// next startup has an empty journal — nothing to replay beyond the gob.
+func (e *Engine) Checkpoint() error {
+	e.journalRecords = nil
+	return e.walFile.Reset()
 }

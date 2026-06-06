@@ -36,6 +36,14 @@ type TermStore interface {
 	AddTerms([]string)
 }
 
+// DocumentJournal durably records document mutations before they touch the
+// in-memory index. Satisfied by *storage.Engine — its Put/Delete signatures
+// match exactly. Set via SetDocumentJournal; nil means no journaling.
+type DocumentJournal interface {
+	Put(ctx context.Context, key, value []byte) error
+	Delete(ctx context.Context, key []byte) error
+}
+
 // Engine is the central orchestrator — it owns all sub-indexes and the
 // scoring pipeline.
 //
@@ -69,6 +77,7 @@ type Engine struct {
 	fstPath string
 
 	termStore TermStore
+	journal   DocumentJournal
 }
 
 // NewEngine constructs a fully initialised Engine.
@@ -89,8 +98,9 @@ func NewEngine(cfg *config.Config, emb embedding.Embedder, scr ranking.Scorer, a
 	}
 }
 
-func (e *Engine) SetTermStore(s TermStore) { e.termStore = s }
-func (e *Engine) SetFSTPath(path string)   { e.fstPath = path }
+func (e *Engine) SetTermStore(s TermStore)         { e.termStore = s }
+func (e *Engine) SetFSTPath(path string)           { e.fstPath = path }
+func (e *Engine) SetDocumentJournal(j DocumentJournal) { e.journal = j }
 
 // RebuildFST rebuilds the FST from the current global vocabulary.
 // Takes Engine.mu.Lock() — safe to call from outside the engine.
@@ -220,9 +230,15 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 
 // Remove deletes all index entries for originalID.
 // Takes Engine.mu.Lock() for its full duration.
-func (e *Engine) Remove(_ context.Context, originalID string) error {
+func (e *Engine) Remove(ctx context.Context, originalID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.journal != nil {
+		if err := e.journal.Delete(ctx, []byte(originalID)); err != nil {
+			return fmt.Errorf("index: journal delete: %w", err)
+		}
+	}
 
 	h := fnv.New64a()
 	h.Write([]byte(originalID))
@@ -278,6 +294,12 @@ func (e *Engine) Remove(_ context.Context, originalID string) error {
 }
 
 func (e *Engine) addInternal(ctx context.Context, originalID string, fullText string, preVec []float32) error {
+	if e.journal != nil {
+		if err := e.journal.Put(ctx, []byte(originalID), []byte(fullText)); err != nil {
+			return fmt.Errorf("index: journal write: %w", err)
+		}
+	}
+
 	logger := slog.With("doc_id", originalID)
 
 	tokens := e.analyzer.Analyze(fullText)

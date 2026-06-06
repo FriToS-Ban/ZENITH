@@ -376,9 +376,23 @@ Every exported method handles a nil receiver with a clean error. No nil pointer 
 
 The engine starts a goroutine on open to warm the ONNX model with a dummy input, which prevents the first real query from paying the JIT compilation cost. If `Close` is called before warmup finishes — common in short-lived tests — that goroutine outlives the `DB`, holds a reference to the ONNX session, and prevents garbage collection. Over many test runs this accumulates into a real memory leak. The warmup goroutine uses the DB's internal context, so `Close` cancels it immediately.
 
-### WAL overhead for library use
+### 12. WAL-backed crash safety in the embeddable library
 
-The storage engine's WAL was designed for a long-running server that needs crash recovery across restarts. A library used in short-lived web request handlers pays WAL write overhead on every `Add` with no benefit — if a request handler crashes mid-index, that request fails and nothing else is at risk. A `WithNoWAL()` option lets users skip it. In-memory mode disables WAL automatically.
+For a long time the durability story for `pkg/zenith` was pretty simple and pretty bad. Every `Add` call updated the in-memory index. Nothing touched disk until `Close` was called. `Close` serialized the entire index to a gob file and that was it. If your process died before `Close` — OOM kill, SIGKILL, power loss, whatever — you lost everything indexed since the last time `Close` ran successfully. The gob file on disk reflected the state from the previous run and nothing more.
+
+That's the same problem SQLite has in its default journal mode, by the way. And it's actually the thing SQLite is most criticized for in embedded use cases. Most people don't realize it but SQLite in WAL mode still has a checkpoint step — it just automates it more aggressively. The fundamental issue is the same: crash at the wrong moment and you lose recent writes.
+
+What I built instead is a proper WAL journal sitting right next to the gob file. Every `Add` and `Delete` call now writes a record to a `.wal` file before it touches the in-memory index. The record is fsynced immediately. Only after that does the in-memory index get updated. This means the worst case on a crash is that you replay the WAL on next open — you never lose a write that was acknowledged.
+
+The mechanics are straightforward. On `Open`, I load the gob first to get the baseline state from the last checkpoint. Then I replay any WAL records written after that. On `Close`, I save the gob and then reset the WAL to zero, which is the checkpoint. Next time you open the file, the WAL is empty and there's nothing to replay. The WAL only matters when the process dies between `Add` calls and the next `Close`.
+
+One thing that took some thought was what to do when both the gob and the WAL have something to say. If the gob is corrupt — bad write, filesystem issue, anything — most systems just give you an error and tell you to rebuild. I looked at this differently. If the gob is corrupt but the WAL has records in it, those records represent real data the user indexed. I throw away the broken gob and rebuild the index from the WAL alone. You lose whatever was checkpointed into the corrupt gob, but you keep the stuff that was written since the last clean checkpoint. SQLite doesn't do this. It fails hard on a corrupt database file, period. If only the WAL has your recent data and the main file is gone, that's your problem.
+
+The one case where I do return an error is if both are gone or corrupt. Corrupt gob with an empty WAL means there's genuinely nothing to recover. Better to surface that as an error than silently open with an empty index and let the user wonder where their data went.
+
+I also added `WithCheckpointInterval` which runs a background goroutine that periodically saves the gob and resets the WAL on a timer you control. Without this, the WAL grows unboundedly if the process runs for a long time without a clean close. With it, WAL replay on crash is bounded to whatever happened in the last interval. The minimum is 10 seconds, enforced. Shorter than that and you're paying meaningful gob serialization overhead continuously, which defeats the purpose.
+
+One thing I explicitly chose not to do for the embeddable library is use the full storage engine. ZENITH has a complete LSM stack — WAL, MemTable, SSTable flush, leveled compaction, Bloom filters, the whole thing. That infrastructure runs in `cmd/server` because the server needs it. But the embeddable library is a different product. If you're importing `pkg/zenith` into your Go service, you don't want four background goroutines, a compaction thread, and SSTable files accumulating in a directory. You want a single file that works. So the library uses only the WAL package directly. The gob is the primary storage format. The WAL is the crash journal. No MemTable, no SSTables, no compaction. The library stays self-contained with exactly two files on disk — the database and the journal alongside it.
 
 ### Memory scaling in :memory: mode
 

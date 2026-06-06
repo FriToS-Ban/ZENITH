@@ -1,13 +1,14 @@
 package zenith
 
-import "github.com/shramanb113/ZENITH/internal/embedding"
+import "time"
 
 type options struct {
-	embedder      embedding.Embedder
-	bm25Only      bool
-	cacheSize     int
-	fuzzyDistance int
-	limit         int
+	embedder           Embedder
+	bm25Only           bool
+	cacheSize          int
+	fuzzyDistance      int
+	limit              int
+	checkpointInterval time.Duration
 }
 
 func defaultOptions() *options {
@@ -29,7 +30,7 @@ type searchOptions struct {
 }
 
 // WithEmbedder replaces the default embedded ONNX embedder with a custom one.
-func WithEmbedder(e embedding.Embedder) Option {
+func WithEmbedder(e Embedder) Option {
 	return func(o *options) error {
 		if e == nil {
 			return ErrInvalidOption
@@ -91,5 +92,20 @@ func Limit(n int) SearchOption {
 		if n > 0 {
 			o.limit = n
 		}
+	}
+}
+
+// WithCheckpointInterval sets how often the DB automatically saves a gob
+// snapshot and resets the WAL in a background goroutine. Default: 0 (disabled).
+// This bounds WAL growth so crash recovery only needs to replay a small delta.
+// Minimum enforced: 10 seconds. Has no effect on :memory: databases.
+func WithCheckpointInterval(d time.Duration) Option {
+	return func(o *options) error {
+		const minInterval = 10 * time.Second
+		if d > 0 && d < minInterval {
+			d = minInterval
+		}
+		o.checkpointInterval = d
+		return nil
 	}
 }

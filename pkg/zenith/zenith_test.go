@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shramanb113/ZENITH/internal/storage/wal"
 	"github.com/shramanb113/ZENITH/pkg/zenith"
 )
 
@@ -841,4 +842,230 @@ func TestSearch_AfterDelete_ResultsUpdated(t *testing.T) {
 	if !found {
 		t.Fatal("non-deleted document should still appear in results")
 	}
+}
+
+// ─── WAL crash-recovery (persistent mode) ────────────────────────────────────
+
+// injectWALRecords writes WAL records directly to path+".wal", simulating
+// the state where documents were indexed (WAL written) but the process
+// crashed before the gob checkpoint.
+func injectWALRecords(t *testing.T, dbPath string, docs map[string]string) {
+	t.Helper()
+	walPath := dbPath + ".wal"
+	w, _, err := wal.OpenWAL(walPath, wal.WALConfig{SyncMode: wal.SyncAlways})
+	if err != nil {
+		t.Fatalf("injectWALRecords OpenWAL: %v", err)
+	}
+	for id, text := range docs {
+		if _, err := w.Append(context.Background(), &wal.Record{
+			Op: wal.OpTypePut, Key: []byte(id), Value: []byte(text),
+		}); err != nil {
+			t.Fatalf("injectWALRecords Append: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("injectWALRecords Close: %v", err)
+	}
+}
+
+func injectWALDelete(t *testing.T, dbPath, id string) {
+	t.Helper()
+	walPath := dbPath + ".wal"
+	w, _, err := wal.OpenWAL(walPath, wal.WALConfig{SyncMode: wal.SyncAlways})
+	if err != nil {
+		t.Fatalf("injectWALDelete OpenWAL: %v", err)
+	}
+	if _, err := w.Append(context.Background(), &wal.Record{
+		Op: wal.OpTypeDelete, Key: []byte(id),
+	}); err != nil {
+		t.Fatalf("injectWALDelete Append: %v", err)
+	}
+	_ = w.Close()
+}
+
+func TestPersistent_WALCrashRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crash.db")
+
+	// Phase 1: clean open+close — establishes an empty gob baseline.
+	db1, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open phase1: %v", err)
+	}
+	mustAdd(t, db1, "doc1", "the quick brown fox")
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close phase1: %v", err)
+	}
+	// After close: gob has doc1, WAL is empty.
+
+	// Phase 2: simulate crash — inject WAL records that were never checkpointed.
+	injectWALRecords(t, path, map[string]string{
+		"doc2": "machine learning algorithms",
+		"doc3": "database crash recovery test",
+	})
+
+	// Phase 3: reopen — WAL replay must recover doc2 and doc3 on top of gob's doc1.
+	db2, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open after crash: %v", err)
+	}
+	defer db2.Close()
+
+	results, err := db2.Search(bgCtx(), "machine learning")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == "doc2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("doc2 must be recovered from WAL replay after simulated crash")
+	}
+}
+
+func TestPersistent_WALEmptyAfterCleanClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clean.db")
+
+	db, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustAdd(t, db, "doc1", "some content here")
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// WAL file must exist but be empty (0 bytes) after a clean close.
+	walPath := path + ".wal"
+	info, err := os.Stat(walPath)
+	if os.IsNotExist(err) {
+		t.Fatal("WAL file must exist alongside the gob file")
+	}
+	if err != nil {
+		t.Fatalf("stat WAL: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Errorf("WAL must be empty after clean close, got %d bytes", info.Size())
+	}
+}
+
+func TestPersistent_DeleteSurvivesCrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "delete_crash.db")
+
+	// Phase 1: index a document and close cleanly.
+	db1, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustAdd(t, db1, "remove-me", "content to be removed later")
+	if err := db1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// gob has "remove-me", WAL is empty.
+
+	// Phase 2: inject a Delete WAL record (simulating: delete was written, then crash).
+	injectWALDelete(t, path, "remove-me")
+
+	// Phase 3: reopen — WAL replay must remove the doc.
+	db2, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open after delete crash: %v", err)
+	}
+	defer db2.Close()
+
+	results, _ := db2.Search(bgCtx(), "content to be removed")
+	for _, r := range results {
+		if r.ID == "remove-me" {
+			t.Fatal("deleted document must not appear after WAL replay")
+		}
+	}
+}
+
+func TestPersistent_CorruptGobFallsBackToWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.db")
+
+	// Phase 1: clean open+close — gob is saved, WAL is empty.
+	db, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustAdd(t, db, "doc1", "base document in gob")
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Phase 2: inject a WAL record (crash before gob save).
+	injectWALRecords(t, path, map[string]string{
+		"doc2": "added before corruption, WAL only",
+	})
+
+	// Phase 3: corrupt the gob file.
+	if err := os.WriteFile(path, []byte("NOT A ZENITH GOB"), 0600); err != nil {
+		t.Fatalf("corrupt gob: %v", err)
+	}
+
+	// Phase 4: reopen — must fall back to WAL-only rebuild.
+	// doc1 is lost (gob corrupted), doc2 must be found (WAL intact).
+	db2, err := zenith.Open(path, zenith.WithBM25Only())
+	if err != nil {
+		t.Fatalf("Open after corruption: %v", err)
+	}
+	defer db2.Close()
+
+	results, err := db2.Search(bgCtx(), "added before corruption")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == "doc2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("doc2 must be recovered from WAL even when gob is corrupt")
+	}
+}
+
+// ─── Public Embedder interface ────────────────────────────────────────────────
+
+// customEmbedder is implemented without importing any internal ZENITH package.
+// It proves that zenith.Embedder is a fully public, self-contained interface.
+type customEmbedder struct{}
+
+func (c *customEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+func (c *customEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{0.1, 0.2, 0.3}
+	}
+	return out, nil
+}
+func (c *customEmbedder) Dimensions() int { return 3 }
+
+// TestWithEmbedder_PublicInterface verifies that a caller can satisfy
+// zenith.Embedder and pass it to WithEmbedder without importing any
+// internal ZENITH packages.
+func TestWithEmbedder_PublicInterface(t *testing.T) {
+	// Compile-time assertion: *customEmbedder must satisfy the public interface.
+	var _ zenith.Embedder = (*customEmbedder)(nil)
+
+	db, err := zenith.Open(":memory:", zenith.WithEmbedder(&customEmbedder{}))
+	if err != nil {
+		t.Fatalf("Open with custom Embedder: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Add(bgCtx(), "doc1", "hello world"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	results, err := db.Search(bgCtx(), "hello")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	_ = results
 }

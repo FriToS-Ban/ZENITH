@@ -529,3 +529,70 @@ func TestRemoveID(t *testing.T) {
 		}
 	}
 }
+
+// ─── DocumentJournal ─────────────────────────────────────────────────────────
+
+// mockJournal records Put/Delete calls for assertion in tests.
+type mockJournal struct {
+	puts    []string // doc IDs passed to Put
+	deletes []string // doc IDs passed to Delete
+}
+
+func (m *mockJournal) Put(_ context.Context, key, _ []byte) error {
+	m.puts = append(m.puts, string(key))
+	return nil
+}
+func (m *mockJournal) Delete(_ context.Context, key []byte) error {
+	m.deletes = append(m.deletes, string(key))
+	return nil
+}
+
+func TestIndexEngine_JournalReceivesPut(t *testing.T) {
+	e := newTestEngine()
+	j := &mockJournal{}
+	e.SetDocumentJournal(j)
+
+	ctx := context.Background()
+	if err := e.Add(ctx, "doc1", "hello world"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if len(j.puts) != 1 || j.puts[0] != "doc1" {
+		t.Errorf("journal puts: got %v, want [doc1]", j.puts)
+	}
+	if len(j.deletes) != 0 {
+		t.Errorf("unexpected journal deletes: %v", j.deletes)
+	}
+}
+
+func TestIndexEngine_JournalReceivesDelete(t *testing.T) {
+	e := newTestEngine()
+	j := &mockJournal{}
+	e.SetDocumentJournal(j)
+
+	ctx := context.Background()
+	_ = e.Add(ctx, "doc1", "hello world")
+
+	// Reset puts count, then delete.
+	j.puts = nil
+	if err := e.Remove(ctx, "doc1"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if len(j.deletes) != 1 || j.deletes[0] != "doc1" {
+		t.Errorf("journal deletes: got %v, want [doc1]", j.deletes)
+	}
+}
+
+func TestIndexEngine_JournalNilSafe(t *testing.T) {
+	e := newTestEngine() // no journal set
+	ctx := context.Background()
+
+	// Must not panic.
+	if err := e.Add(ctx, "doc1", "text"); err != nil {
+		t.Fatalf("Add without journal: %v", err)
+	}
+	if err := e.Remove(ctx, "doc1"); err != nil {
+		t.Fatalf("Remove without journal: %v", err)
+	}
+}

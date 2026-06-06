@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/shramanb113/ZENITH/internal/analysis"
@@ -33,6 +35,7 @@ import (
 	"github.com/shramanb113/ZENITH/internal/index"
 	"github.com/shramanb113/ZENITH/internal/localembedder"
 	"github.com/shramanb113/ZENITH/internal/ranking"
+	"github.com/shramanb113/ZENITH/internal/storage/wal"
 )
 
 const maxIDBytes = 512
@@ -45,10 +48,12 @@ type DB struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 
-	engine *index.Engine
-	path   string    // absolute path; empty for :memory:
-	lock   *fileLock // nil for :memory:
-	opts   *options
+	engine   *index.Engine
+	path     string    // absolute path; empty for :memory:
+	lock     *fileLock // nil for :memory:
+	opts     *options
+	docWAL   *wal.WAL     // nil for :memory:
+	ckptStop chan struct{} // closed to stop background checkpoint goroutine; nil if not running
 }
 
 // Open opens or creates a ZENITH index at path.
@@ -97,13 +102,50 @@ func Open(path string, opt ...Option) (*DB, error) {
 	}
 	db.lock = fl
 
-	if err := eng.Load(absPath); err != nil && !os.IsNotExist(err) {
-		if errors.Is(err, index.ErrIncompatibleVersion) {
+	// Open (or create) the WAL journal alongside the gob file.
+	walPath := absPath + ".wal"
+	walCfg := wal.WALConfig{SyncMode: wal.SyncAlways, Dir: filepath.Dir(absPath)}
+	docWAL, walRecords, err := wal.OpenWAL(walPath, walCfg)
+	if err != nil {
+		fl.release()
+		return nil, fmt.Errorf("zenith: open wal: %w", err)
+	}
+	db.docWAL = docWAL
+
+	// Load the gob snapshot. Corruption-resistant: if the gob is unreadable
+	// (but not a version mismatch) and the WAL has records, rebuild from WAL
+	// only. If both are missing/empty, surface the error so the caller knows.
+	gobErr := eng.Load(absPath)
+	if gobErr != nil && !os.IsNotExist(gobErr) {
+		if errors.Is(gobErr, index.ErrIncompatibleVersion) {
+			_ = docWAL.Close()
 			fl.release()
 			return nil, ErrIncompatibleVersion
 		}
-		fl.release()
-		return nil, fmt.Errorf("zenith: %w", err)
+		if len(walRecords) == 0 {
+			// Corrupt gob and no WAL data to recover from — user must rebuild.
+			_ = docWAL.Close()
+			fl.release()
+			return nil, fmt.Errorf("zenith: %w", gobErr)
+		}
+		// Corrupt gob but WAL has records — rebuild from WAL.
+		slog.Warn("zenith: gob corrupt, rebuilding from WAL", "error", gobErr)
+	}
+
+	// Replay WAL delta on top of the gob baseline (or as full history if gob was corrupt).
+	for _, r := range walRecords {
+		switch r.Op {
+		case wal.OpTypePut:
+			_ = eng.Add(context.Background(), string(r.Key), string(r.Value))
+		case wal.OpTypeDelete:
+			_ = eng.Remove(context.Background(), string(r.Key))
+		}
+	}
+
+	// Start background checkpointing if the caller requested it.
+	if o.checkpointInterval > 0 {
+		db.ckptStop = make(chan struct{})
+		go db.checkpointLoop(o.checkpointInterval)
 	}
 
 	return db, nil
@@ -134,6 +176,14 @@ func (db *DB) Add(ctx context.Context, id, text string) (err error) {
 	defer db.mu.Unlock()
 	if db.closed.Load() {
 		return ErrClosed
+	}
+
+	if db.docWAL != nil {
+		if _, err = db.docWAL.Append(ctx, &wal.Record{
+			Op: wal.OpTypePut, Key: []byte(id), Value: []byte(text),
+		}); err != nil {
+			return fmt.Errorf("zenith: wal: %w", err)
+		}
 	}
 
 	if err = db.engine.Add(ctx, id, text); err != nil {
@@ -176,6 +226,16 @@ func (db *DB) AddBatch(ctx context.Context, docs map[string]string) (err error) 
 	defer db.mu.Unlock()
 	if db.closed.Load() {
 		return ErrClosed
+	}
+
+	if db.docWAL != nil {
+		for _, d := range batch {
+			if _, err = db.docWAL.Append(ctx, &wal.Record{
+				Op: wal.OpTypePut, Key: []byte(d.ID), Value: []byte(d.Text),
+			}); err != nil {
+				return fmt.Errorf("zenith: wal: %w", err)
+			}
+		}
 	}
 
 	if err = db.engine.AddBatch(ctx, batch); err != nil {
@@ -241,10 +301,54 @@ func (db *DB) Delete(ctx context.Context, id string) (err error) {
 		return ErrClosed
 	}
 
+	if db.docWAL != nil {
+		if _, err = db.docWAL.Append(ctx, &wal.Record{
+			Op: wal.OpTypeDelete, Key: []byte(id),
+		}); err != nil {
+			return fmt.Errorf("zenith: wal: %w", err)
+		}
+	}
+
 	if err = db.engine.Remove(ctx, id); err != nil {
 		return fmt.Errorf("zenith: %w", err)
 	}
 	return nil
+}
+
+// checkpoint saves the gob snapshot and resets the WAL.
+// MUST be called with db.mu held (write lock).
+func (db *DB) checkpoint() error {
+	if db.path == "" || db.docWAL == nil {
+		return nil
+	}
+	if err := db.engine.Save(db.path); err != nil {
+		return fmt.Errorf("zenith: %w", err)
+	}
+	if err := db.docWAL.Reset(); err != nil {
+		slog.Warn("zenith: WAL reset failed after checkpoint", "error", err)
+	}
+	return nil
+}
+
+// checkpointLoop runs as a background goroutine when WithCheckpointInterval is set.
+// It periodically saves the gob and resets the WAL, bounding WAL growth.
+func (db *DB) checkpointLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-db.ckptStop:
+			return
+		case <-ticker.C:
+			db.mu.Lock()
+			if !db.closed.Load() {
+				if err := db.checkpoint(); err != nil {
+					slog.Warn("zenith: background checkpoint failed", "error", err)
+				}
+			}
+			db.mu.Unlock()
+		}
+	}
 }
 
 // Close flushes and closes the database. Idempotent — safe to call twice.
@@ -262,16 +366,28 @@ func (db *DB) Close() (err error) {
 			}
 		}()
 
+		// Stop the background checkpoint goroutine before acquiring the lock.
+		if db.ckptStop != nil {
+			close(db.ckptStop)
+			db.ckptStop = nil
+		}
+
 		db.mu.Lock()
 		defer db.mu.Unlock()
 
 		db.closed.Store(true)
 
 		if db.path != "" {
-			if saveErr := db.engine.Save(db.path); saveErr != nil {
-				err = fmt.Errorf("zenith: %w", saveErr)
+			if saveErr := db.checkpoint(); saveErr != nil {
+				err = saveErr
 			}
 		}
+
+		if db.docWAL != nil {
+			_ = db.docWAL.Close()
+			db.docWAL = nil
+		}
+
 		if db.lock != nil {
 			db.lock.release()
 			db.lock = nil

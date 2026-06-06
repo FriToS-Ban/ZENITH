@@ -389,6 +389,31 @@ func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 	return wal, records, nil
 }
 
+// Reset flushes, syncs, and truncates the WAL file to zero, then resets
+// internal state so the WAL can accept new records. Called after a
+// successful gob checkpoint — the delta journal is no longer needed.
+func (w *WAL) Reset() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.buf.Flush(); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	w.buf.Reset(w.file)
+	w.byteWritten = 0
+	w.seq.Store(0)
+	return nil
+}
+
 func (w *WAL) Close() error {
 	if !w.closed.CompareAndSwap(false, true) {
 		return nil

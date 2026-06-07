@@ -526,6 +526,86 @@ The four benchmark columns — ZENITH lib, ZENITH gRPC, Meilisearch BM25, Typese
 
 ---
 
+## Neural expansion threshold bug (threshold drift)
+
+The `Search` function in `internal/index/engine.go` had a condition to fire neural expansion as a fallback when results were weak:
+
+```go
+if len(ranks) == 0 || ranks[0].Score < 5.0 {
+```
+
+The constant `5.0` was written when the scoring pipeline returned raw boosted keyword scores (10,000–60,000 range). After RRF replaced that pipeline, the same constant remained. RRF scores are computed as `1/(k + rank)` with k=60, giving a maximum possible score of `1/61 ≈ 0.0164` per list, or `~0.033` across both keyword and vector lists. The condition `ranks[0].Score < 5.0` was therefore **always true** — neural expansion fired on every single query regardless of result quality.
+
+The consequence: every search call ran `getSemanticNeighbors` for each query token, iterating all 70,880 word vectors per token (O(n_vocab × n_tokens)). On a 100K document index this was pure wasted work — the initial ranking already had good results — and roughly doubled query latency.
+
+The fix is one line: `len(ranks) == 0 || ranks[0].Score < 5.0` → `len(ranks) == 0`. Neural expansion now fires only when the engine returns zero results, which is its correct intended role as a last-resort fallback.
+
+This is a threshold drift bug: a constant that was meaningful in one scoring context became permanently wrong after the scoring pipeline changed. It compiled, tests passed, nothing crashed — it just silently ran 2× more expensive than intended on every search call. The benchmark run that discovered it took ~3 hours on 101K queries because the O(n) neighbor scan was executing for all of them.
+
+---
+
+## BM25-only mode ranking bug (scorer bypass via epsilon mismatch)
+
+ZENITH's `WithBM25Only()` option is meant to disable vector search and rank results by BM25 — directly comparable to SQLite FTS5 and Bleve. The MS MARCO benchmark revealed it was not doing that: Recall@10 was 0.406 against 0.594 for Bleve and 0.625 for SQLite FTS5, despite all three using lexical BM25 ranking.
+
+The engine has a correctly-implemented BM25 scorer (`internal/ranking/bm25.go`, Okapi BM25, k1=1.2, b=0.75) that is indexed on every document. `rankAndFuse` called `e.bm25.Query(qryToks)` on every search. Yet recall was 46% lower than Bleve. The BM25 result was being computed and silently discarded.
+
+**The primary ranking key was n-gram coverage, not BM25.** The `lexicalPass` scores every document as:
+
+```go
+keywordScores[id] += (float64(len(frag)) / float64(Q)) * 100.0
+```
+
+Then `rankAndFuse` added constant boosts before passing to RRF:
+
+```go
+boosted[id] = score + 10000.0
+if len(matchToks[id]) >= len(qryToks) {
+    boosted[id] += 50000.0
+}
+scored := e.scorer.Score(kwIDs, boosted, vcIDs, vScores, e.idMapping)
+```
+
+This n-gram coverage scoring has no IDF weighting. "The" and "serendipity" contribute identically per fragment. Short prefixes like "cap" match "captain", "capable", "capacity" — all with the same weight as an exact match for "capital". BM25's IDF suppresses common words and rewards rare term matches; the coverage formula does neither.
+
+**BM25 was wired as a tiebreaker with an epsilon that never fired.** After `scorer.Score()` returned RRF-ranked results, BM25 was used only to swap adjacent results whose RRF scores differed by less than `epsilon = 1e-6`:
+
+```go
+const epsilon = 1e-6
+if rrfDiff > -epsilon {
+    if bm25Map[b.ID] > bm25Map[a.ID] { swap }
+}
+```
+
+Adjacent RRF scores differ by `1/(60+n) − 1/(60+n+1) = 1/((60+n)(61+n)) ≈ 2.64×10⁻⁴`. This is 264× larger than the epsilon threshold. **The BM25 tiebreaker never fired on any query.** Every call to `e.bm25.Query()` was pure wasted computation — the result was computed and immediately ignored.
+
+This is the same threshold drift pattern as the neural expansion bug: a constant calibrated for floating-point noise (`1e-6`) became wrong after the scoring pipeline introduced large constant boosts (+10000, +50000), pushing all score differences far above the threshold. The code compiled, tests passed, nothing crashed — it just silently ranked by n-gram coverage instead of BM25 on every BM25-only search.
+
+The fix is a single conditional branch in `rankAndFuse`: when no vector scores are present (BM25-only mode), bypass the n-gram coverage path and use `bm25Map` as the primary sort key for RRF input instead:
+
+```go
+if len(vScores) == 0 {
+    bm25Results := e.bm25.Query(qryToks)
+    bm25ByID := make(map[uint64]float64, len(bm25Results))
+    for _, r := range bm25Results {
+        bm25ByID[r.DocID] = r.Score
+    }
+    kwIDs := make([]uint64, 0, len(kwScores))
+    for id := range kwScores {
+        kwIDs = append(kwIDs, id)
+    }
+    scored := e.scorer.Score(kwIDs, bm25ByID, nil, nil, e.idMapping)
+    // ...
+    return results
+}
+```
+
+The lexical pass still runs to produce the candidate set (preserving fuzzy, phonetic, and n-gram prefix matching). BM25 then ranks those candidates. The hybrid path (vectors present) is unchanged.
+
+Result: Recall@10 jumped from 0.406 to 0.594 — matching Bleve exactly, and within 0.031 of SQLite FTS5. The 0.031 gap against SQLite FTS5 reflects tokenizer differences (ZENITH uses Porter2 + stop-word filter; SQLite FTS5 uses its built-in unicode61 tokenizer with different stemming behaviour on a handful of edge cases).
+
+---
+
 ## A note on how this was built
 
 Every component in ZENITH was written from scratch. The WAL, the skip-list, the SSTable compactor, the BK-tree, the FST dictionary, the RRF ranker, the ONNX tokenizer, the WordPiece implementation, the mean pooling step — all of it. Nothing was outsourced to an embedded key-value store or a vector database library.

@@ -1,0 +1,5 @@
+.cache/
+results/
+*.db
+*.db.wal
+*.db.lock

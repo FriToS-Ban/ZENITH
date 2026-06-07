@@ -17,15 +17,24 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
+	goruntime "runtime"
 	"strings"
 )
 
 const (
-	ortVersion = "1.17.3"
+	ortVersion = "1.25.0"
 	modelURL   = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
-	assetsDir  = "internal/localembedder/assets"
 )
+
+// assetsDir resolves to internal/localembedder/assets/ relative to the
+// repository root, regardless of which directory go generate is called from.
+func assetsPath() string {
+	_, file, _, _ := goruntime.Caller(0)
+	// file = .../ZENITH/scripts/download_assets.go
+	// go up one level from scripts/ to reach the repo root
+	root := filepath.Dir(filepath.Dir(file))
+	return filepath.Join(root, "internal", "localembedder", "assets")
+}
 
 type ortRelease struct {
 	url      string
@@ -62,13 +71,14 @@ var ortReleases = map[string]ortRelease{
 }
 
 func main() {
-	platform := runtime.GOOS + "/" + runtime.GOARCH
+	platform := goruntime.GOOS + "/" + goruntime.GOARCH
 	rel, ok := ortReleases[platform]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unsupported platform: %s\n", platform)
 		os.Exit(1)
 	}
 
+	assetsDir := assetsPath()
 	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

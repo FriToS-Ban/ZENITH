@@ -480,7 +480,9 @@ func (e *Engine) Search(ctx context.Context, query string) ([]SearchResponse, er
 
 	ranks := e.rankAndFuse(keywordScores, matchTokens, rawTokens, vectorScores)
 
-	if len(ranks) == 0 || ranks[0].Score < 5.0 {
+	// Neural expansion fires only when the engine finds zero results.
+	// RRF scores are in [0, ~0.033] — any threshold above that fires universally.
+	if len(ranks) == 0 {
 		expandedTokens := e.expandTokens(rawTokens)
 
 		e.inverted.RLock()
@@ -636,6 +638,29 @@ func (e *Engine) rankAndFuse(
 	qryToks []string,
 	vScores map[uint64]float64,
 ) []SearchResponse {
+
+	// BM25-only mode: no vector scores are present.
+	// Use proper BM25 as the primary ranking signal over the lexical candidates.
+	// N-gram coverage scores have no IDF weighting, producing worse recall than
+	// BM25 (adjacent RRF score gaps ~2.64e-4 >> the 1e-6 tiebreaker epsilon,
+	// so the old BM25 tiebreaker path never fired).
+	if len(vScores) == 0 {
+		bm25Results := e.bm25.Query(qryToks)
+		bm25ByID := make(map[uint64]float64, len(bm25Results))
+		for _, r := range bm25Results {
+			bm25ByID[r.DocID] = r.Score
+		}
+		kwIDs := make([]uint64, 0, len(kwScores))
+		for id := range kwScores {
+			kwIDs = append(kwIDs, id)
+		}
+		scored := e.scorer.Score(kwIDs, bm25ByID, nil, nil, e.idMapping)
+		results := make([]SearchResponse, len(scored))
+		for i, r := range scored {
+			results[i] = SearchResponse{ID: r.ID, Score: r.Score}
+		}
+		return results
+	}
 
 	boosted := make(map[uint64]float64, len(kwScores))
 	for id, score := range kwScores {

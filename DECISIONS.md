@@ -606,6 +606,94 @@ Result: Recall@10 jumped from 0.406 to 0.594 — matching Bleve exactly, and wit
 
 ---
 
+## ONNX indexing was 40× slower than the design math said (fixed padding + unbatched documents + warm-up cache eviction)
+
+The benchmark design notes estimated ~200–250s to index 100k MS MARCO passages in hybrid mode. The observed time was ~3,600s on a cold machine (5,536s thermally throttled). Systematic debugging found three compounding root causes, none of which was visible from any single file:
+
+**1. Every input was padded to a fixed 256 tokens.** `tokenizer.tokenize` always returned 256-length tensors. The attention mask makes padded positions *correct*, not *free* — ONNX Runtime computes the full sequence regardless. MS MARCO passages average 76 WordPiece tokens (p50=72, p95=136), so each document paid ~3× its real cost. Vocabulary words (~4 tokens) paid ~60×. Measured fix impact: a 512-word batch dropped from 14.1s to 0.37s (38×); a 64-passage batch from 25.4ms/doc to 7.4ms/doc.
+
+The subtlety: the int8 dynamically-quantized model computes activation scales over whole tensors *including padding*, so embeddings vary ~1% with padding length (cosine ≈ 0.988 between the same text at different paddings). This is quantization noise, not a masking bug — a genuine mask bug would drop similarity to 0.3–0.7. A regression test (`TestEmbed_PaddingInvariance`) pins this at ≥ 0.98.
+
+**2. Documents were embedded one at a time.** `AddBatch` batched only the word-vector warm-up; each document still went through a single-input `Embed` call (88.8ms each at fixed 256 padding) inside `addInternal`, sequentially, under the engine write lock. The fix embeds documents in length-sorted batches of 64 on a producer goroutine that runs one 1,024-doc chunk ahead of index construction, so ONNX inference and lexical indexing overlap. Length-sorting matters: unsorted batches pad to an average of 161 tokens on MS MARCO; sorted batches pad to 76 (2.11× less compute).
+
+Two non-obvious negative results, measured rather than assumed: batch 128 is ~12× slower per document than batch 64 on 12-thread consumer hardware (int8 GEMM cliff), and four concurrent sessions are ~5× slower than one (each session's intra-op thread pool oversubscribes the cores). The "session pool capped at NumCPU" described in earlier docs was never in the code — and building it would have made indexing slower. One session, batch 64, is the optimum here.
+
+**3. The word-vector warm-up was thrown away.** `AddBatch` pre-embedded the vocabulary purely to populate the LRU embed cache — 10,000 entries against a 70,880-term vocabulary. By the time `addInternal` read words back, the early ~60k entries had been evicted, so most of the vocabulary was embedded twice at full cost (~2,000s wasted at the old per-word cost). The warm-up now writes vectors directly into the `VectorStore` instead of relying on the cache.
+
+The lesson is the same shape as the threshold-drift bugs: nothing crashed, nothing errored, every component worked "correctly" in isolation. The system was just quietly 40× more expensive than intended, and only an end-to-end benchmark with a back-of-envelope sanity check ("the math works out to 200–250 seconds") exposed the gap.
+
+---
+
+## Hybrid recall capped by the unfixed half of the BM25 bypass bug
+
+The BM25-only ranking bug (previous section) was fixed with a conditional: *when no vector scores are present*, rank the lexical candidates by BM25. That fix deliberately left the hybrid path untouched — which meant hybrid mode kept fusing the **broken** lexical list. `rankAndFuse` fed RRF a keyword list ranked by n-gram coverage with +10,000/+50,000 constant boosts — the exact scoring that measured Recall@10 = 0.406 standalone. Hybrid's 0.812 was RRF(0.406-quality lexical, semantic).
+
+The fix applies the same BM25 ranking to the hybrid path: the lexical candidate set (still recalled via n-gram + phonetic + BK-tree fuzzy, so typo tolerance is preserved) is ranked by `1.0 + BM25(d, Q)` for documents BM25 can score, and by `coverage × 1e-9` for fuzzy/phonetic-only candidates so they rank strictly below every BM25-scored document (BM25 IDF is +1-smoothed, hence always positive). The dead epsilon tiebreaker (1e-6 against RRF gaps of ~2.6e-4 — never fired) was removed.
+
+The pattern worth remembering: when a bug is found in a shared code path and fixed for the mode where it was *detected*, audit every other mode that flows through the same path. The hybrid branch had the identical defect for the identical reason, hidden because hybrid's absolute numbers still looked good (0.812 beat every lexical engine by 30%+).
+
+**Measured outcome (2026-06-10): Recall@10 unchanged at 0.812.** The fix is correct in isolation — the lexical list fed to RRF is now the 0.594-quality BM25 ranking instead of the 0.406-quality coverage ranking — but the fused top-10 did not improve. The fix stays (it is strictly more principled and removes dead code), but it is not a recall lever. Why it isn't is the next section.
+
+---
+
+## The recall denominator was 32 queries, and equal-weight RRF was below the dense list alone
+
+Instrumenting the unchanged 0.812 produced two discoveries, one about measurement and one about ranking.
+
+**Measurement: the benchmark's Recall@10 is computed over 32 queries.** The harness indexes the first 100k of 8.8M passages and (correctly) only counts queries whose ground-truth passage is inside that subset. 100k/8.8M ≈ 1.1% of 6,980 qrel queries ≈ 32 queries. Every published recall number was a fraction of 32: ZENITH hybrid 0.812 = 26/32, ZENITH BM25 and Bleve 0.594 = 19/32, SQLite FTS5 0.625 = 20/32. Recall moves in steps of 0.031 — which is why a genuinely correct ranking fix measured "identical to three decimals," and why "matches Bleve exactly" was a much weaker statement than it sounded. The diagnostic fix: index the 7,399 ground-truth passages alongside the 100k corpus (107k total), making all 6,980 queries evaluable. Tuning decisions are made on n=6,980; the official benchmark number stays on the standard corpus with its n=32 caveat now documented.
+
+**Ranking: equal-weight RRF fused below its best input.** On the 6,980-query corpus, measured per-list:
+
+| Signal | Recall@10 |
+|---|---|
+| Dense (MiniLM vector pass) alone | 0.947 |
+| Lexical (BM25-ranked candidates) alone | 0.803 |
+| Fused, RRF k=60, equal weights (shipping config) | 0.918 |
+| Union of both top-10s (fusion ceiling) | 0.971 |
+
+Fusion was *subtracting* 3 points from the dense list. Mechanism: RRF treats both lists as equally trustworthy. When the dense list answers a query at rank 1–3, a lexically-popular wrong document that appears mid-list in *both* rankings accumulates two reciprocal-rank contributions and displaces the right answer from the fused top-10. The weaker the second list, the more often this happens — and the lexical list (0.803) is much weaker than the dense list (0.947) on a semantic corpus.
+
+The fix is weighted RRF: `score(d) = 1.0/(k + rank_lex) + wVec/(k + rank_vec)`. A grid over k ∈ {10,20,30,60,120} × wVec ∈ {0.5,1,1.5,2,3} on the 6,980 queries shows a broad plateau — k 10–30 × wVec 1.5–3.0 all ≥ 0.952 — peaking at 0.9595. The shipped constants are k=20, wVec=2.0, chosen from the plateau's interior rather than its edge to avoid overfitting the grid. Fused 0.960 > dense-only 0.947: fusion finally adds value, with the lexical list rescuing dense misses instead of vetoing dense wins. The constants live in `config.DefaultConfig()` (`RRFConstant`, `VectorWeight` — the latter was declared but consumed nowhere until now), and `ranking.NewWeightedRRFRanker` carries the measured justification in its godoc.
+
+The diagnostic harness is `internal/index/msmarco_diag_test.go` (gated behind `ZENITH_MSMARCO_DIAG=1`); it persists the indexed engine to `bench/.cache/` so re-runs skip the 15-minute indexing step.
+
+**Verified on the official benchmark (2026-06-11): Recall@10 = 0.906 (29/32), up from 0.812 (26/32)** — exactly the value the 6,980-query grid simulation predicted for the official subset before the run. Index time 935.9s, consistent with the post-fix 890.6s under thermal variance.
+
+---
+
+## BM25 micro-tuning: measured, rejected
+
+After the lexical comparison showed ZENITH at 0.803 vs SQLite FTS5 at 0.794 and Bleve at 0.8095 (Recall@10, n=6,980, gt-augmented corpus via `bench/cmd/lexdiag`), two candidate BM25 improvements were evaluated against the built index in a single diagnostic pass: excluding synonym-expansion tokens from BM25 scoring, and the standard MS MARCO-tuned parameters (k1=0.82, b=0.68; also Anserini's k1=0.9, b=0.4) versus the universal defaults (k1=1.2, b=0.75).
+
+Result: the best combination (base tokens + 0.82/0.68) gained **+0.0035 lexical recall — under one standard error (±0.0047)** — and hybrid fused recall was flat across all six variants (0.9589–0.9595). Neither change ships:
+
+- The k1/b values are MS MARCO-specific; shipping benchmark-tuned constants as library defaults is overfitting dressed up as engineering. The universal defaults stay.
+- Synonym expansion's BM25 cost is −0.002 recall here, but its purpose is candidate recall on vocabularies where users and documents use different words. A null cost on one corpus is not a reason to remove a feature designed for other corpora.
+
+The conclusion that matters: ZENITH's lexical quality is at parity with Bleve and ahead of SQLite FTS5; the official benchmark's "FTS5 leads" impression was a one-query artifact of the 32-query denominator. There is no lexical recall gap to close — the differentiator is the semantic pass (+15 points fused).
+
+---
+
+## BM25 posting lists: the O(N) scan is gone
+
+`BM25Scorer.Query()` originally iterated every indexed document and evaluated BM25 against the query — O(N) per query regardless of how many documents contained any query term. At 100k documents × 6,980 benchmark queries that was ~700M BM25 evaluations on one goroutine, ~280ms p50, and the single biggest reason Bleve looked 100× faster per query.
+
+The fix is the textbook one: an inverted posting list (`term → []docID`) maintained alongside the existing term-frequency maps. `Query` walks only the posting lists of the query's terms — O(Σ hits) — accumulating scores per document. Measured on a synthetic 100k corpus with deliberately long posting lists: 10.3ms/query vs ~280ms, ~27× (real queries with rarer terms do better).
+
+Three design points worth recording:
+
+1. **Score-identical by construction.** Documents containing no query term always scored 0 and were discarded; only they are skipped now. Repeated query terms are collapsed to (term, count) and the IDF contribution multiplied by count, matching the original per-occurrence loop exactly. An equivalence test (`TestQuery_PostingListMatchesBruteForce`) pins posting-list output against a brute-force reference, including re-index, Remove, repeated-term, and unknown-term cases.
+
+2. **No serialization format bump.** Posting lists are derived state. `LoadState` rebuilds them from `termFreqs` in one pass (~1s at 100k docs), so existing `zenith.db` gob files load unchanged and the v3 format stays v3.
+
+3. **Remove/re-index maintain the lists incrementally** with a swap-delete per (term, doc). This is O(posting-list length) per term of the removed document — fine for the embedded-library write rates ZENITH targets.
+
+With BM25 off the critical path, hybrid query latency is bounded by the n-gram/BK-tree lexical pass and the O(N) vector scan — the vector scan being the known HNSW roadmap item.
+
+**Verified on the official benchmark (2026-06-11): ZENITH BM25 p50 284ms → 177ms, hybrid p50 → 346ms** (down from 413ms cold / 787ms hot), recall unchanged at 0.594/0.906 as the equivalence tests guaranteed. ZENITH BM25 now beats SQLite FTS5 on both recall (0.803 vs 0.794, n=6,980) and latency (177ms vs 257ms p50). The remaining 177ms is the typo-tolerance machinery (BK-tree fuzzy + prefix n-gram + phonetic candidates) — the next latency target if one is needed.
+
+---
+
 ## A note on how this was built
 
 Every component in ZENITH was written from scratch. The WAL, the skip-list, the SSTable compactor, the BK-tree, the FST dictionary, the RRF ranker, the ONNX tokenizer, the WordPiece implementation, the mean pooling step — all of it. Nothing was outsourced to an embedded key-value store or a vector database library.

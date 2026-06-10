@@ -51,44 +51,77 @@ func New() (*Embedder, error) {
 	return &Embedder{tok: tok, model: m}, nil
 }
 
+// seqLenFor rounds n up to a multiple of 8 (efficient ONNX kernel shapes),
+// capped at maxLen. The model has dynamic sequence axes — padding every input
+// to a fixed 256 wastes 3–60× compute on typical passages and single words.
+func seqLenFor(n int) int {
+	const align = 8
+	l := (n + align - 1) / align * align
+	if l > maxLen {
+		l = maxLen
+	}
+	return l
+}
+
 // Embed returns a 384-dimensional L2-normalised vector for text.
 func (e *Embedder) Embed(_ context.Context, text string) ([]float32, error) {
-	ids, mask, typeIDs := e.tok.tokenize(text, maxLen)
-	hidden, err := e.model.infer(ids, mask, typeIDs, 1, maxLen)
+	ids := e.tok.encodeIDs(text, maxLen)
+	seqLen := seqLenFor(len(ids))
+
+	flatIDs := make([]int64, seqLen)
+	flatMask := make([]int64, seqLen)
+	flatTypeIDs := make([]int64, seqLen)
+	copy(flatIDs, ids)
+	for i := range ids {
+		flatMask[i] = 1
+	}
+
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, 1, seqLen)
 	if err != nil {
 		return nil, err
 	}
-	vec := meanPool(hidden, mask, maxLen, hiddenSize)
+	vec := meanPool(hidden, flatMask, seqLen, hiddenSize)
 	return l2Normalize(vec), nil
 }
 
 // EmbedBatch returns embeddings for all texts in a single ONNX forward pass.
+// The batch is padded to the longest sequence it contains, not to maxLen.
 func (e *Embedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 	n := len(texts)
-	flatIDs := make([]int64, n*maxLen)
-	flatMask := make([]int64, n*maxLen)
-	flatTypeIDs := make([]int64, n*maxLen)
-
+	encoded := make([][]int64, n)
+	longest := 0
 	for i, t := range texts {
-		ids, mask, typeIDs := e.tok.tokenize(t, maxLen)
-		copy(flatIDs[i*maxLen:], ids)
-		copy(flatMask[i*maxLen:], mask)
-		copy(flatTypeIDs[i*maxLen:], typeIDs)
+		encoded[i] = e.tok.encodeIDs(t, maxLen)
+		if len(encoded[i]) > longest {
+			longest = len(encoded[i])
+		}
+	}
+	seqLen := seqLenFor(longest)
+
+	flatIDs := make([]int64, n*seqLen)
+	flatMask := make([]int64, n*seqLen)
+	flatTypeIDs := make([]int64, n*seqLen)
+	for i, ids := range encoded {
+		base := i * seqLen
+		copy(flatIDs[base:], ids)
+		for j := range ids {
+			flatMask[base+j] = 1
+		}
 	}
 
-	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, maxLen)
+	hidden, err := e.model.infer(flatIDs, flatMask, flatTypeIDs, n, seqLen)
 	if err != nil {
 		return nil, err
 	}
 
-	chunkSize := maxLen * hiddenSize
+	chunkSize := seqLen * hiddenSize
 	result := make([][]float32, n)
 	for i := range texts {
 		chunk := hidden[i*chunkSize : (i+1)*chunkSize]
-		vec := meanPool(chunk, flatMask[i*maxLen:(i+1)*maxLen], maxLen, hiddenSize)
+		vec := meanPool(chunk, flatMask[i*seqLen:(i+1)*seqLen], seqLen, hiddenSize)
 		result[i] = l2Normalize(vec)
 	}
 	return result, nil

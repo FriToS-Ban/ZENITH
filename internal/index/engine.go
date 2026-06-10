@@ -184,8 +184,17 @@ func (e *Engine) AddWithVector(ctx context.Context, originalID string, fullText 
 	return nil
 }
 
+// docEmbedBatch is the ONNX inference sweet spot measured on 12-thread
+// consumer hardware: batch 128 hit an int8 GEMM cliff (12× slower per doc)
+// and concurrent sessions oversubscribed the cores (5× slower).
+const docEmbedBatch = 64
+
 // AddBatch indexes all documents and rebuilds the FST once at the end.
 // Takes Engine.mu.Lock() for its full duration.
+//
+// Document vectors are computed in batched ONNX forward passes on a
+// producer goroutine that runs one chunk ahead of index construction, so
+// embedding and lexical indexing overlap instead of alternating.
 func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -195,6 +204,48 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	docs = sorted
 
+	e.warmWordVectors(ctx, docs)
+
+	const chunkN = 1024
+	type embChunk struct {
+		start, end int
+		vecs       [][]float32
+	}
+	done := make(chan struct{})
+	defer close(done)
+	ch := make(chan embChunk, 1)
+	// The producer only reads docs and calls the thread-safe embedder; all
+	// index mutation stays on this goroutine, which holds Engine.mu.
+	go func() {
+		defer close(ch)
+		for start := 0; start < len(docs); start += chunkN {
+			end := min(start+chunkN, len(docs))
+			c := embChunk{start: start, end: end, vecs: e.embedDocs(ctx, docs[start:end])}
+			select {
+			case ch <- c:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	for c := range ch {
+		for i := c.start; i < c.end; i++ {
+			if err := e.addInternal(ctx, docs[i].ID, docs[i].Text, c.vecs[i-c.start]); err != nil {
+				return err
+			}
+		}
+	}
+	return e.rebuildFSTLocked()
+}
+
+// warmWordVectors embeds every vocabulary token in docs that has no stored
+// word vector yet and writes the result directly into the vector store.
+// The previous implementation only warmed the LRU embed cache: with a
+// vocabulary much larger than the cache (70k terms vs 10k entries) the
+// early entries were evicted before addInternal read them back, so most
+// words were embedded twice at full cost.
+func (e *Engine) warmWordVectors(ctx context.Context, docs []BatchDoc) {
 	tokenSet := make(map[string]struct{})
 	for _, d := range docs {
 		for _, t := range e.analyzer.Analyze(d.Text) {
@@ -203,29 +254,74 @@ func (e *Engine) AddBatch(ctx context.Context, docs []BatchDoc) error {
 			}
 		}
 	}
-	if len(tokenSet) > 0 {
-		tokens := make([]string, 0, len(tokenSet))
-		for t := range tokenSet {
-			tokens = append(tokens, t)
-		}
-		const warmBatch = 512
-		for i := 0; i < len(tokens); i += warmBatch {
-			end := i + warmBatch
-			if end > len(tokens) {
-				end = len(tokens)
-			}
-			if _, err := e.embedder.EmbedBatch(ctx, tokens[i:end]); err != nil {
-				slog.Warn("index: word-vector pre-warm failed", "error", err)
-			}
-		}
+	if len(tokenSet) == 0 {
+		return
 	}
+	tokens := make([]string, 0, len(tokenSet))
+	for t := range tokenSet {
+		tokens = append(tokens, t)
+	}
+	sort.Strings(tokens)
 
-	for _, d := range docs {
-		if err := e.addInternal(ctx, d.ID, d.Text, d.Vector); err != nil {
-			return err
+	const warmBatch = 512
+	for i := 0; i < len(tokens); i += warmBatch {
+		end := min(i+warmBatch, len(tokens))
+		chunk := tokens[i:end]
+		vecs, err := e.embedder.EmbedBatch(ctx, chunk)
+		if err != nil || len(vecs) != len(chunk) {
+			slog.Warn("index: word-vector warm-up failed", "error", err)
+			continue
+		}
+		e.vectors.Lock()
+		wordVecs := e.vectors.GetWordVectors()
+		for j, t := range chunk {
+			wordVecs[t] = VectorEntry{
+				Vector:    FloatsToFloat16(vecs[j]),
+				Magnitude: ranking.Magnitude(vecs[j]),
+			}
+		}
+		e.vectors.Unlock()
+	}
+}
+
+// embedDocs returns one vector per doc, aligned by index. Docs with a
+// caller-provided vector keep it; docs whose batch fails stay nil and fall
+// back to single-doc embedding inside addInternal. Texts are embedded in
+// length-sorted batches so each batch pads to its own longest member rather
+// than the corpus worst case (2.1× less ONNX compute on MS MARCO).
+func (e *Engine) embedDocs(ctx context.Context, docs []BatchDoc) [][]float32 {
+	out := make([][]float32, len(docs))
+	var need []int
+	for i, d := range docs {
+		if d.Vector != nil {
+			out[i] = d.Vector
+		} else {
+			need = append(need, i)
 		}
 	}
-	return e.rebuildFSTLocked()
+	sort.Slice(need, func(a, b int) bool {
+		la, lb := len(docs[need[a]].Text), len(docs[need[b]].Text)
+		if la != lb {
+			return la < lb
+		}
+		return need[a] < need[b]
+	})
+	for i := 0; i < len(need); i += docEmbedBatch {
+		end := min(i+docEmbedBatch, len(need))
+		texts := make([]string, end-i)
+		for j, idx := range need[i:end] {
+			texts[j] = docs[idx].Text
+		}
+		vecs, err := e.embedder.EmbedBatch(ctx, texts)
+		if err != nil || len(vecs) != len(texts) {
+			slog.Warn("index: batch document embedding failed; falling back to per-doc", "error", err)
+			continue
+		}
+		for j, idx := range need[i:end] {
+			out[idx] = vecs[j]
+		}
+	}
+	return out
 }
 
 // Remove deletes all index entries for originalID.
@@ -662,19 +758,33 @@ func (e *Engine) rankAndFuse(
 		return results
 	}
 
-	boosted := make(map[uint64]float64, len(kwScores))
-	for id, score := range kwScores {
-		if score <= 0 {
+	// Hybrid mode: rank the lexical RRF list by BM25 (IDF-weighted), exactly
+	// as the BM25-only branch above does. The previous coverage-based boosts
+	// (+10000/+50000) had no IDF weighting and were measured at Recall@10
+	// 0.406 vs BM25's 0.594 — fusing the weaker list capped hybrid recall.
+	// Fuzzy/phonetic-only candidates (no BM25 score for the query terms)
+	// stay in the list, ranked below all BM25-scored documents by their
+	// coverage score scaled under BM25's positive range (IDF is +1 smoothed,
+	// so BM25 scores are always > 0; coverage sums stay < 1e5).
+	bm25Results := e.bm25.Query(qryToks)
+	bm25ByID := make(map[uint64]float64, len(bm25Results))
+	for _, r := range bm25Results {
+		bm25ByID[r.DocID] = r.Score
+	}
+	kwRank := make(map[uint64]float64, len(kwScores))
+	for id, cov := range kwScores {
+		if cov <= 0 {
 			continue
 		}
-		boosted[id] = score + 10000.0
-		if len(matchToks[id]) >= len(qryToks) {
-			boosted[id] += 50000.0
+		if s, ok := bm25ByID[id]; ok {
+			kwRank[id] = 1.0 + s
+		} else {
+			kwRank[id] = cov * 1e-9
 		}
 	}
 
-	kwIDs := make([]uint64, 0, len(boosted))
-	for id := range boosted {
+	kwIDs := make([]uint64, 0, len(kwRank))
+	for id := range kwRank {
 		kwIDs = append(kwIDs, id)
 	}
 	vcIDs := make([]uint64, 0, len(vScores))
@@ -683,29 +793,7 @@ func (e *Engine) rankAndFuse(
 	}
 
 	// e.idMapping is safe here — Engine.mu.RLock() (Search) or Lock() (others) is held.
-	scored := e.scorer.Score(kwIDs, boosted, vcIDs, vScores, e.idMapping)
-
-	bm25Results := e.bm25.Query(qryToks)
-	bm25Map := make(map[string]float64, len(bm25Results))
-	for _, r := range bm25Results {
-		bm25Map[e.idMapping[r.DocID]] = r.Score
-	}
-
-	const epsilon = 1e-6
-	for i := 1; i < len(scored); i++ {
-		for j := i; j > 0; j-- {
-			a, b := scored[j-1], scored[j]
-			rrfDiff := a.Score - b.Score
-			if rrfDiff >= epsilon {
-				break
-			}
-			if rrfDiff > -epsilon {
-				if bm25Map[b.ID] > bm25Map[a.ID] {
-					scored[j-1], scored[j] = scored[j], scored[j-1]
-				}
-			}
-		}
-	}
+	scored := e.scorer.Score(kwIDs, kwRank, vcIDs, vScores, e.idMapping)
 
 	results := make([]SearchResponse, len(scored))
 	for i, r := range scored {

@@ -78,7 +78,7 @@ func Open(path string, opt ...Option) (*DB, error) {
 	cfg.FuzzyMaxDist = o.fuzzyDistance
 
 	tkz := analysis.NewStandardAnalyzer()
-	scorer := ranking.NewRRFRanker(0, 0)
+	scorer := ranking.NewWeightedRRFRanker(cfg.RRFConstant, 0, 1.0, cfg.VectorWeight)
 	eng := index.NewEngine(cfg, emb, scorer, tkz)
 
 	db := &DB{

@@ -35,13 +35,18 @@ func DefaultConfig() *Config {
 		MaxResults:       10,
 		FuzzyMaxDist:     2,
 		BloomFPRate:      0.01,
-		RRFConstant:      60.0,
+		// RRFConstant and VectorWeight were tuned on MS MARCO dev with all
+		// 6,980 ground truths indexed: k=20/wVec=2.0 reached Recall@10 0.960
+		// vs 0.918 for the previous k=60/equal-weight fusion (which scored
+		// below the dense list alone at 0.947). Both sit on a broad plateau:
+		// k 10–30 × wVec 1.5–3.0 all measured ≥ 0.952.
+		RRFConstant:      20.0,
 		EmbeddingWorkers: 4,
 		CompactionInterv: 30 * time.Second,
 		WALSyncInterval:  100 * time.Millisecond,
 		NerveGRPCAddr: "localhost:8000",
 		PhoneticWeight:   0.3,
-		VectorWeight:     0.7,
+		VectorWeight:     2.0, // RRF semantic-list weight (lexical list weight is 1.0)
 		NeuralWeight:     1.0,
 	}
 }

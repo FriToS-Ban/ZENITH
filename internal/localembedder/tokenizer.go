@@ -64,6 +64,31 @@ func (t *tokenizer) tokenize(text string, maxLength int) ([]int64, []int64, []in
 	return ids, mask, typeIDs
 }
 
+// encodeIDs returns the input token IDs for text — [CLS] + wordpieces + [SEP] —
+// truncated so the total never exceeds maxTokens. No padding is applied; the
+// caller pads to its chosen sequence length. Padding to a fixed 256 here cost
+// 3–60× wasted ONNX compute per input (attention masks make padded positions
+// correct, not free).
+func (t *tokenizer) encodeIDs(text string, maxTokens int) []int64 {
+	pieces := t.wordpieceTokenize(strings.ToLower(text))
+
+	cap := maxTokens - 2
+	if len(pieces) > cap {
+		pieces = pieces[:cap]
+	}
+
+	ids := make([]int64, 0, len(pieces)+2)
+	ids = append(ids, tokenCLS)
+	for _, tok := range pieces {
+		id, ok := t.vocab[tok]
+		if !ok {
+			id = tokenUNK
+		}
+		ids = append(ids, id)
+	}
+	return append(ids, tokenSEP)
+}
+
 func (t *tokenizer) wordpieceTokenize(text string) []string {
 	var out []string
 	for _, word := range splitOnWhitespaceAndPunct(text) {

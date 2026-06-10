@@ -35,6 +35,14 @@ type BM25Scorer struct {
 	docLengths map[uint64]int            // internalID → term count
 	termFreqs  map[uint64]map[string]int // internalID → term → frequency
 
+	// Inverted posting lists: term → IDs of documents containing it.
+	// Lets Query touch only documents containing at least one query term —
+	// O(hits) instead of the O(N) full-corpus scan that made every query
+	// evaluate BM25 against all 100k documents (~280ms p50 at 100k docs).
+	// Rebuilt from termFreqs on LoadState, so the serialized format is
+	// unchanged.
+	postings map[string][]uint64
+
 	// Corpus-level state
 	docFreq   map[string]int // term → number of documents containing it
 	totalDocs int
@@ -63,6 +71,7 @@ func NewBM25Scorer(p BM25Params) *BM25Scorer {
 		b:          b,
 		docLengths: make(map[uint64]int),
 		termFreqs:  make(map[uint64]map[string]int),
+		postings:   make(map[string][]uint64),
 		docFreq:    make(map[string]int),
 	}
 }
@@ -81,6 +90,7 @@ func (s *BM25Scorer) Index(docID uint64, tokens []string) {
 			if s.docFreq[term] <= 0 {
 				delete(s.docFreq, term)
 			}
+			s.removePosting(term, docID)
 		}
 		s.totalLen -= s.docLengths[docID]
 		s.totalDocs--
@@ -98,6 +108,25 @@ func (s *BM25Scorer) Index(docID uint64, tokens []string) {
 
 	for term := range tf {
 		s.docFreq[term]++
+		s.postings[term] = append(s.postings[term], docID)
+	}
+}
+
+// removePosting deletes docID from term's posting list.
+// Caller must hold s.mu.
+func (s *BM25Scorer) removePosting(term string, docID uint64) {
+	list := s.postings[term]
+	for i, id := range list {
+		if id == docID {
+			list[i] = list[len(list)-1]
+			list = list[:len(list)-1]
+			break
+		}
+	}
+	if len(list) == 0 {
+		delete(s.postings, term)
+	} else {
+		s.postings[term] = list
 	}
 }
 
@@ -115,6 +144,7 @@ func (s *BM25Scorer) Remove(docID uint64) {
 		if s.docFreq[term] <= 0 {
 			delete(s.docFreq, term)
 		}
+		s.removePosting(term, docID)
 	}
 	s.totalLen -= s.docLengths[docID]
 	s.totalDocs--
@@ -130,6 +160,8 @@ func (s *BM25Scorer) State() (map[uint64]int, map[uint64]map[string]int, map[str
 }
 
 // LoadState restores BM25 corpus state after deserialisation.
+// Posting lists are not part of the serialized format — they are derived
+// state, rebuilt here from termFreqs in one pass.
 func (s *BM25Scorer) LoadState(docLengths map[uint64]int, termFreqs map[uint64]map[string]int, docFreq map[string]int, totalDocs, totalLen int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,6 +170,13 @@ func (s *BM25Scorer) LoadState(docLengths map[uint64]int, termFreqs map[uint64]m
 	s.docFreq = docFreq
 	s.totalDocs = totalDocs
 	s.totalLen = totalLen
+
+	s.postings = make(map[string][]uint64, len(docFreq))
+	for docID, tf := range termFreqs {
+		for term := range tf {
+			s.postings[term] = append(s.postings[term], docID)
+		}
+	}
 }
 
 // avgdl returns the average document length across the corpus.
@@ -157,8 +196,10 @@ func (s *BM25Scorer) idf(term string) float64 {
 	return math.Log((n-df+0.5)/(df+0.5) + 1)
 }
 
-// scoreDoc computes the BM25 score for a single document against query terms.
-func (s *BM25Scorer) scoreDoc(docID uint64, queryTerms []string) float64 {
+// scoreDocParams computes the BM25 score for a single document with explicit
+// k1/b, so parameter variants can be
+// evaluated against a built index without mutating the scorer.
+func (s *BM25Scorer) scoreDocParams(docID uint64, queryTerms []string, k1, b float64) float64 {
 	tf := s.termFreqs[docID]
 	dl := float64(s.docLengths[docID])
 	avgdl := s.avgdl()
@@ -171,10 +212,26 @@ func (s *BM25Scorer) scoreDoc(docID uint64, queryTerms []string) float64 {
 		}
 		idf := s.idf(term)
 		// BM25 TF normalisation
-		tfNorm := freq * (s.k1 + 1) / (freq + s.k1*(1-s.b+s.b*(dl/avgdl)))
+		tfNorm := freq * (k1 + 1) / (freq + k1*(1-b+b*(dl/avgdl)))
 		score += idf * tfNorm
 	}
 	return score
+}
+
+// ScoreDocs computes BM25 scores for the listed documents only, with explicit
+// k1/b parameters. O(len(docIDs) × len(queryTerms)) — used for offline
+// parameter evaluation where scoring the whole corpus per variant would be
+// prohibitive. Documents scoring 0 are omitted from the result.
+func (s *BM25Scorer) ScoreDocs(docIDs []uint64, queryTerms []string, k1, b float64) map[uint64]float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[uint64]float64, len(docIDs))
+	for _, id := range docIDs {
+		if sc := s.scoreDocParams(id, queryTerms, k1, b); sc > 0 {
+			out[id] = sc
+		}
+	}
+	return out
 }
 
 // BM25Result is a scored document from a BM25 query.
@@ -183,9 +240,17 @@ type BM25Result struct {
 	Score float64
 }
 
-// Query scores all indexed documents against queryTerms and returns results
-// sorted descending by score. Documents with score 0 are excluded.
+// Query scores documents containing at least one query term and returns
+// results sorted descending by score. Documents with score 0 are excluded.
 // queryTerms must be stemmed/normalised the same way as at index time.
+//
+// Cost is O(Σ posting-list lengths of the query's terms) — only documents
+// containing a query term are evaluated. The previous implementation scanned
+// every indexed document per query (O(N)); at 100k docs that was ~700M BM25
+// evaluations across the MS MARCO query set and dominated query latency.
+// Scores are identical: documents without any query term always scored 0
+// and were discarded anyway. Repeated query terms contribute once per
+// occurrence, matching the original term-loop semantics.
 func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -194,9 +259,31 @@ func (s *BM25Scorer) Query(queryTerms []string) []BM25Result {
 		return nil
 	}
 
-	results := make([]BM25Result, 0, len(s.termFreqs))
-	for docID := range s.termFreqs {
-		sc := s.scoreDoc(docID, queryTerms)
+	// Collapse duplicate terms but preserve their multiplicity so repeated
+	// terms score exactly as the original per-occurrence loop did.
+	termCount := make(map[string]int, len(queryTerms))
+	for _, term := range queryTerms {
+		termCount[term]++
+	}
+
+	avgdl := s.avgdl()
+	scores := make(map[uint64]float64)
+	for term, count := range termCount {
+		ids := s.postings[term]
+		if len(ids) == 0 {
+			continue
+		}
+		idf := s.idf(term) * float64(count)
+		for _, docID := range ids {
+			freq := float64(s.termFreqs[docID][term])
+			dl := float64(s.docLengths[docID])
+			tfNorm := freq * (s.k1 + 1) / (freq + s.k1*(1-s.b+s.b*(dl/avgdl)))
+			scores[docID] += idf * tfNorm
+		}
+	}
+
+	results := make([]BM25Result, 0, len(scores))
+	for docID, sc := range scores {
 		if sc > 0 {
 			results = append(results, BM25Result{DocID: docID, Score: sc})
 		}

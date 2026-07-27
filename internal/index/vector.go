@@ -30,13 +30,13 @@ func Float16ToFloats(vec []uint16) []float32 {
 
 type VectorStore struct {
 	mu          sync.RWMutex
-	vectors     map[uint32]VectorEntry
+	vectors     map[uint64]VectorEntry
 	wordVectors map[string]VectorEntry
 }
 
 func NewVectorStore() *VectorStore {
 	return &VectorStore{
-		vectors:     make(map[uint32]VectorEntry),
+		vectors:     make(map[uint64]VectorEntry),
 		wordVectors: make(map[string]VectorEntry),
 	}
 }
@@ -46,7 +46,7 @@ func (vs *VectorStore) RUnlock() { vs.mu.RUnlock() }
 func (vs *VectorStore) Lock()    { vs.mu.Lock() }
 func (vs *VectorStore) Unlock()  { vs.mu.Unlock() }
 
-func (vs *VectorStore) GetVectors() map[uint32]VectorEntry       { return vs.vectors }
+func (vs *VectorStore) GetVectors() map[uint64]VectorEntry       { return vs.vectors }
 func (vs *VectorStore) GetWordVectors() map[string]VectorEntry   { return vs.wordVectors }
 func (vs *VectorStore) HasWordVector(word string) bool {
 	vs.mu.RLock()

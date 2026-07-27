@@ -21,7 +21,7 @@ func TestBM25_IndexAndQuery(t *testing.T) {
 	}
 
 	// Docs 1 and 3 both contain "kubernetes" and "pod"; doc 2 has neither.
-	docIDs := make(map[uint32]bool)
+	docIDs := make(map[uint64]bool)
 	for _, r := range results {
 		docIDs[r.DocID] = true
 	}

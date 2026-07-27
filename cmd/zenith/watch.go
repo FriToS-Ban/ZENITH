@@ -10,6 +10,9 @@ import (
 
 	"github.com/shramanb113/ZENITH/internal/autostart"
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	"github.com/shramanb113/ZENITH/internal/fileindex"
+	imageindexer "github.com/shramanb113/ZENITH/internal/image"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/shramanb113/ZENITH/internal/watchlist"
 	"github.com/spf13/cobra"
 )
@@ -137,6 +140,13 @@ var watchStartCmd = &cobra.Command{
 		}
 		defer w.Close()
 
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -148,15 +158,15 @@ var watchStartCmd = &cobra.Command{
 			cancel()
 		}()
 
-		plural := "ies"
+		pluralSuffix := "ies"
 		if len(valid) == 1 {
-			plural = "y"
+			pluralSuffix = "y"
 		}
-		fmt.Printf("\n  %s  watching %d director%s\n", bold(cyan("watch")), len(valid), plural)
+		printHeader("watch", fmt.Sprintf("%d director%s", len(valid), pluralSuffix))
 		for _, d := range valid {
-			fmt.Printf("  %s  %s\n", cyan("→"), d)
+			fmt.Printf("  %s  %s\n", cc("→", cAccent), muted(d))
 		}
-		fmt.Printf("\n  %s\n\n", dim("Ctrl-C to stop"))
+		fmt.Printf("\n  %s\n\n", muted("Ctrl-C to stop"))
 
 		return w.WatchMultiple(ctx, valid)
 	},
@@ -197,6 +207,13 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 		}
 		defer w.Close()
 
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -210,12 +227,19 @@ Use 'zenith watch add' + 'zenith watch start' for persistent watching.`,
 
 		if watchRunFlags.indexFirst {
 			fmt.Printf("  Bulk-indexing %s ...\n", dir)
+			home, _ := os.UserHomeDir()
+			if fi, err := fileindex.Open(filepath.Join(home, ".zenith", "file_hashes.json")); err == nil {
+				w.SetSkipFile(fi.IsUpToDate)
+				w.SetAfterFile(func(path string) { _ = fi.Mark(path) })
+				defer fi.Save()
+			}
 			if err := w.IndexDir(ctx, dir); err != nil {
 				return fmt.Errorf("initial index: %w", err)
 			}
 		}
 
-		fmt.Printf("\n  %s  %s  %s\n\n", bold(cyan("watch")), dir, dim("(Ctrl-C to stop)"))
+		printHeader("watch", dir)
+		fmt.Printf("  %s\n\n", muted("Ctrl-C to stop"))
 		return w.Watch(ctx, dir)
 	},
 }

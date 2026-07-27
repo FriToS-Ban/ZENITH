@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -16,20 +17,31 @@ var rootCmd = &cobra.Command{
 
 Engine architecture:
   [Crawler] → [Analyzer] → [Embedder] → [LSM Storage]
-  (fsnotify)   (FST+BKTree) (Ollama/OpenAI) (WAL→MemTable→SSTable)
+  (fsnotify)   (FST+BKTree) (ONNX/local) (WAL→MemTable→SSTable)
 
 Hybrid ranking:
   Lexical  BM25 + TF-IDF + Porter stemming + edge n-grams
   Fuzzy    BK-tree Levenshtein (O(log n))
-  Semantic vector cosine via local Ollama embeddings
+  Semantic vector cosine via embedded ONNX model
   Fusion   Reciprocal Rank Fusion (RRF)`,
 }
 
-func main() {
-	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd)
+func init() {
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
+	// No setup gate — the embedded model requires no installation step.
+}
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func main() {
+	autoMigrate() // one-time cleanup of Python nerve artifacts on upgrade
+	rootCmd.AddCommand(indexCmd, searchCmd, watchCmd, serveCmd, versionCmd, uninstallCmd, updateCmd, logCmd, setupCmd)
+
+	err := rootCmd.Execute()
+	if err == nil {
+		return
 	}
+	if !errors.Is(err, errSetupRequired) {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	os.Exit(1)
 }

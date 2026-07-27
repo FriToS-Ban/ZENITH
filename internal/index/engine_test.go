@@ -403,19 +403,117 @@ func TestEngine_Remove_ReAdd(t *testing.T) {
 	}
 }
 
+// ─── AddBatch ────────────────────────────────────────────────────────────────
+
+func TestEngine_AddBatch_IndexesAllDocs(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "b1", Text: "distributed tracing observability", Vector: make([]float32, 384)},
+		{ID: "b2", Text: "container orchestration kubernetes", Vector: make([]float32, 384)},
+		{ID: "b3", Text: "machine learning inference pipeline", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	for _, d := range docs {
+		results, err := e.Search(ctx, d.Text[:10])
+		if err != nil {
+			t.Fatalf("Search(%q): %v", d.Text[:10], err)
+		}
+		found := false
+		for _, r := range results {
+			if r.ID == d.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("doc %q not found after AddBatch", d.ID)
+		}
+	}
+}
+
+func TestEngine_AddBatch_FSTRebuildOnce(t *testing.T) {
+	// Verify FST is usable after AddBatch (prefix search works → FST was rebuilt).
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "d1", Text: "kubernetes cluster service", Vector: make([]float32, 384)},
+		{ID: "d2", Text: "kubernetes deployment pod", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	terms, err := e.FSTPrefixSearch("kub", 10)
+	if err != nil {
+		t.Fatalf("FSTPrefixSearch: %v", err)
+	}
+	if len(terms) == 0 {
+		t.Error("expected FST to contain terms with prefix 'kub' after AddBatch")
+	}
+}
+
+func TestEngine_AddBatch_Empty(t *testing.T) {
+	e := newTestEngine()
+	if err := e.AddBatch(context.Background(), nil); err != nil {
+		t.Errorf("AddBatch(nil) should not error, got: %v", err)
+	}
+}
+
+func TestEngine_AddBatch_SearchableAfterSave(t *testing.T) {
+	e := newTestEngine()
+	ctx := context.Background()
+
+	docs := []BatchDoc{
+		{ID: "x1", Text: "golang concurrency channels goroutines", Vector: make([]float32, 384)},
+	}
+	if err := e.AddBatch(ctx, docs); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "batch.db")
+	if err := e.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	e2 := newTestEngine()
+	if err := e2.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	results, err := e2.Search(ctx, "golang goroutines")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == "x1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("AddBatch doc not found after Save/Load round-trip")
+	}
+}
+
 // ─── removeID ─────────────────────────────────────────────────────────────────
 
 func TestRemoveID(t *testing.T) {
 	cases := []struct {
-		ids    []uint32
-		target uint32
-		want   []uint32
+		ids    []uint64
+		target uint64
+		want   []uint64
 	}{
-		{[]uint32{1, 2, 3}, 2, []uint32{1, 3}},
-		{[]uint32{1, 2, 3}, 1, []uint32{2, 3}},
-		{[]uint32{1, 2, 3}, 3, []uint32{1, 2}},
-		{[]uint32{1, 2, 3}, 9, []uint32{1, 2, 3}}, // not found
-		{[]uint32{}, 1, []uint32{}},
+		{[]uint64{1, 2, 3}, 2, []uint64{1, 3}},
+		{[]uint64{1, 2, 3}, 1, []uint64{2, 3}},
+		{[]uint64{1, 2, 3}, 3, []uint64{1, 2}},
+		{[]uint64{1, 2, 3}, 9, []uint64{1, 2, 3}}, // not found
+		{[]uint64{}, 1, []uint64{}},
 		{nil, 1, nil},
 	}
 	for _, c := range cases {
@@ -429,5 +527,72 @@ func TestRemoveID(t *testing.T) {
 				t.Errorf("removeID(%v, %d)[%d] = %d, want %d", c.ids, c.target, i, got[i], c.want[i])
 			}
 		}
+	}
+}
+
+// ─── DocumentJournal ─────────────────────────────────────────────────────────
+
+// mockJournal records Put/Delete calls for assertion in tests.
+type mockJournal struct {
+	puts    []string // doc IDs passed to Put
+	deletes []string // doc IDs passed to Delete
+}
+
+func (m *mockJournal) Put(_ context.Context, key, _ []byte) error {
+	m.puts = append(m.puts, string(key))
+	return nil
+}
+func (m *mockJournal) Delete(_ context.Context, key []byte) error {
+	m.deletes = append(m.deletes, string(key))
+	return nil
+}
+
+func TestIndexEngine_JournalReceivesPut(t *testing.T) {
+	e := newTestEngine()
+	j := &mockJournal{}
+	e.SetDocumentJournal(j)
+
+	ctx := context.Background()
+	if err := e.Add(ctx, "doc1", "hello world"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if len(j.puts) != 1 || j.puts[0] != "doc1" {
+		t.Errorf("journal puts: got %v, want [doc1]", j.puts)
+	}
+	if len(j.deletes) != 0 {
+		t.Errorf("unexpected journal deletes: %v", j.deletes)
+	}
+}
+
+func TestIndexEngine_JournalReceivesDelete(t *testing.T) {
+	e := newTestEngine()
+	j := &mockJournal{}
+	e.SetDocumentJournal(j)
+
+	ctx := context.Background()
+	_ = e.Add(ctx, "doc1", "hello world")
+
+	// Reset puts count, then delete.
+	j.puts = nil
+	if err := e.Remove(ctx, "doc1"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if len(j.deletes) != 1 || j.deletes[0] != "doc1" {
+		t.Errorf("journal deletes: got %v, want [doc1]", j.deletes)
+	}
+}
+
+func TestIndexEngine_JournalNilSafe(t *testing.T) {
+	e := newTestEngine() // no journal set
+	ctx := context.Background()
+
+	// Must not panic.
+	if err := e.Add(ctx, "doc1", "text"); err != nil {
+		t.Fatalf("Add without journal: %v", err)
+	}
+	if err := e.Remove(ctx, "doc1"); err != nil {
+		t.Fatalf("Remove without journal: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 
@@ -64,27 +65,27 @@ func (d *FSTDictionary) Build(terms []string) error {
 
 // ─── On-disk build ────────────────────────────────────────────────────────────
 
-// BuildToFile builds the FST and writes it atomically to path, then reopens
-// the file via memory mapping so subsequent reads page in from disk on demand.
+// BuildToFile builds the FST and writes it atomically to path, then reloads it.
 //
-// Write is atomic: the FST is first written to path+".tmp", synced, then
-// renamed over path so a crash mid-write never leaves a corrupt file.
+// On Linux/macOS the file is memory-mapped (vellum.Open) for efficient paging.
+// On Windows, mmap is avoided entirely: the FST is read into memory with
+// vellum.Load so no file handle is kept open. This is required because Windows
+// refuses to rename over a file that has any open handle — whether from our own
+// mmap, OneDrive sync, or Windows Defender — producing "Access is denied".
 func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	deduped := sortAndDedup(terms)
-
 	tmpPath := path + ".tmp"
 
+	// Write the new FST to the temp file outside the lock — this is the slow part.
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("fst: create %s: %w", tmpPath, err)
 	}
-
 	if _, err2 := buildFSTInto(f, deduped); err2 != nil {
 		f.Close()
 		os.Remove(tmpPath)
 		return err2
 	}
-
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
@@ -92,30 +93,64 @@ func (d *FSTDictionary) BuildToFile(terms []string, path string) error {
 	}
 	f.Close()
 
+	// Hold the write lock for the entire close → rename → reload sequence so
+	// readers never observe a nil FST during the swap.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	closeFST(d.fst)
+	d.fst = nil
+	d.built = false
+
+	// On Windows: remove the destination before rename so that no external
+	// handle (cloud sync, antivirus) can block the operation.
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(path)
+	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("fst: rename to %s: %w", path, err)
 	}
 
-	// Reopen as mmap — now the OS owns paging.
-	return d.OpenFromFile(path)
+	newFST, err := loadFST(path)
+	if err != nil {
+		return fmt.Errorf("fst: load %s: %w", path, err)
+	}
+	d.fst = newFST
+	d.built = true
+	return nil
 }
 
-// OpenFromFile opens path as a memory-mapped FST, replacing any existing FST.
-// The old FST (if any) is closed first to release its mmap.
-// Returns an error if the file does not exist or is corrupt.
+// OpenFromFile loads the FST at path, replacing any existing FST.
+// The old FST (if any) is closed first to release any resources it holds.
 func (d *FSTDictionary) OpenFromFile(path string) error {
-	newFST, err := vellum.Open(path)
+	newFST, err := loadFST(path)
 	if err != nil {
 		return fmt.Errorf("fst: open %s: %w", path, err)
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	closeFST(d.fst) // release old mmap
+	closeFST(d.fst)
 	d.fst = newFST
 	d.built = true
 	return nil
+}
+
+// loadFST opens the FST at path.
+// On Windows the file is read fully into memory (vellum.Load) so no file handle
+// remains open after this call. On other platforms it is memory-mapped
+// (vellum.Open) so the OS can page in only the portions that are accessed.
+func loadFST(path string) (*vellum.FST, error) {
+	if runtime.GOOS == "windows" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return vellum.Load(data)
+	}
+	return vellum.Open(path)
 }
 
 // Close releases any memory mapping held by the FST.
@@ -207,6 +242,10 @@ func buildFSTInto(w interface {
 		}
 		if err := b.Close(); err != nil {
 			return nil, fmt.Errorf("fst: close empty builder: %w", err)
+		}
+		// Write serialized bytes to w so BuildToFile gets a valid (non-empty) file.
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			return nil, fmt.Errorf("fst: write empty: %w", err)
 		}
 		fst, err := vellum.Load(buf.Bytes())
 		if err != nil {

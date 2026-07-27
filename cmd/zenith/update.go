@@ -29,44 +29,43 @@ var updateCmd = &cobra.Command{
 	Long: `Checks GitHub for a newer release and runs:
   go install github.com/shramanb113/ZENITH/cmd/zenith@latest
 
-Requires go in PATH. Index data and the nerve sidecar are unaffected.
-The nerve sidecar is refreshed automatically on next run.`,
+Requires go in PATH. Index data is preserved. Python files from previous
+versions are cleaned up automatically on first run of the new binary.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runUpdate()
 	},
 }
 
 func runUpdate() error {
-	fmt.Println()
-	fmt.Println("  Checking for updates...")
+	printHeader("update", "checking for new release")
 
 	latest, err := versionCheckerFn()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ! Could not check for updates: %v\n", err)
-		fmt.Println("  Proceeding with install anyway...")
+		fmt.Printf("  %s  could not check for updates: %v\n", yellow("!"), err)
+		fmt.Printf("  %s\n\n", muted("proceeding with install anyway..."))
 	} else {
-		fmt.Printf("  Current:  %s\n", version)
-		fmt.Printf("  Latest:   %s\n", latest)
+		fmt.Printf("  %s  %s\n", muted("current"), version)
+		fmt.Printf("  %s  %s\n\n", muted("latest "), latest)
 
 		if version != "dev" && version == latest {
-			fmt.Printf("\n  ✓ Already up to date (%s).\n\n", version)
+			fmt.Printf("  %s  already up to date (%s)\n\n", green("✓"), version)
 			return nil
 		}
 		if version == "dev" {
-			fmt.Println("  Development build detected — skipping version comparison.")
+			fmt.Printf("  %s\n\n", muted("development build — skipping version comparison"))
 		}
 	}
 
-	fmt.Printf("\n  Running: go install %s\n", installTarget)
+	fmt.Printf("  %s  go install %s\n\n", muted("running"), muted(installTarget))
 	if err := goInstallFn(); err != nil {
 		return err
 	}
 
+	printDivider()
 	if latest != "" && version != latest {
-		fmt.Printf("\n  ✓ Updated to %s. Restart zenith to use the new version.\n\n", latest)
+		printFooter("updated to "+latest, "restart zenith to use the new version")
 	} else {
-		fmt.Println("\n  ✓ Updated to latest release.")
-		fmt.Println()
+		printFooter("updated to latest release")
 	}
 	return nil
 }
@@ -107,5 +106,8 @@ func runGoInstall() error {
 	cmd := exec.Command(goPath, "install", installTarget)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Bypass the Go module proxy so the install always fetches the latest
+	// commit directly from GitHub instead of a potentially stale cached version.
+	cmd.Env = append(os.Environ(), "GOPROXY=direct", "GONOSUMDB=*")
 	return cmd.Run()
 }

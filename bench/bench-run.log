@@ -1,0 +1,52 @@
+Loading MS MARCO dataset (scale=100k)...
+Loaded 100000 passages, 6980 queries (qrel-filtered), 6980 qrels
+
+[ZENITH hybrid] initialising...
+[ZENITH hybrid] indexing 100000 documents...
+2026/06/07 22:11:28 INFO index: FST rebuilt terms=70880
+[ZENITH hybrid] indexed in 5536.5s, heap delta 1094 MB
+[ZENITH hybrid] running 6980 queries...
+[ZENITH hybrid] Recall@10=0.812  p50=413.0ms p95=578.0ms p99=686.0ms
+
+[ZENITH BM25] initialising...
+[ZENITH BM25] indexing 100000 documents...
+2026/06/07 23:02:15 INFO index: FST rebuilt terms=70880
+[ZENITH BM25] indexed in 46.4s, heap delta 939 MB
+[ZENITH BM25] running 6980 queries...
+[ZENITH BM25] Recall@10=0.406  p50=273.0ms p95=489.0ms p99=645.0ms
+
+[SQLite FTS5] initialising...
+
+[Bleve] initialising...
+[Bleve] indexing 100000 documents...
+[Bleve] indexed in 75.4s, heap delta 835 MB
+[Bleve] running 6980 queries...
+[Bleve] Recall@10=0.594  p50=4.0ms p95=27.0ms p99=52.0ms
+
+────────────────────────────────────────────────────────────────────────────────
+ZENITH Embeddable Benchmark — MS MARCO dev (100k passages, 6,980 queries)
+Hardware: 12 CPU, windows/amd64, go1.26.1
+────────────────────────────────────────────────────────────────────────────────
+
+                      ZENITH hybrid     ZENITH BM25       Bleve             
+                      ──────────────────────────────────────────────────────
+Recall@10             0.812             0.406             0.594             
+Query p50             413.0ms           273.0ms           4.0ms             
+Query p95             578.0ms           489.0ms           27.0ms            
+Query p99             686.0ms           645.0ms           52.0ms            
+Index all docs        5536.5s           46.4s             75.4s             
+Memory (heap)         1094 MB           939 MB            835 MB            
+
+────────────────────────────────────────────────────────────────────────────────
+Notes:
+  ZENITH hybrid: BM25 + vector semantic + fuzzy + phonetic (ONNX or deterministic fallback).
+  ZENITH BM25: pure lexical — directly comparable to SQLite FTS5 and Bleve.
+  SQLite FTS5 via mattn/go-sqlite3 (CGo — same bar as ZENITH hybrid ONNX).
+  Bleve: BM25 + Levenshtein fuzzy, pure Go, no CGo required.
+  All engines run in-process. No HTTP, no Docker.
+  Recall@10: queries whose relevant passage exists in the indexed subset only.
+  Memory: heap allocation delta during indexing (runtime.ReadMemStats).
+  SQLite FTS5 skipped: init failed: sqlite: setup: no such module: fts5
+────────────────────────────────────────────────────────────────────────────────
+
+Results saved to results\2026-06-07-100k.md

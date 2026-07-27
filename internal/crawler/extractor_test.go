@@ -11,13 +11,17 @@ import (
 // ─── SupportedExt ─────────────────────────────────────────────────────────────
 
 func TestSupportedExt(t *testing.T) {
-	supported := []string{".txt", ".md", ".go", ".py", ".html", ".htm", ".json", ".yaml", ".log"}
+	supported := []string{
+		".txt", ".md", ".go", ".py", ".html", ".htm", ".json", ".yaml", ".log",
+		".pdf",
+		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+	}
 	for _, ext := range supported {
 		if !SupportedExt(ext) {
 			t.Errorf("SupportedExt(%q) = false, want true", ext)
 		}
 	}
-	unsupported := []string{".pdf"}
+	unsupported := []string{".exe", ".zip", ".mp4", ".docx"}
 	for _, ext := range unsupported {
 		if SupportedExt(ext) {
 			t.Errorf("SupportedExt(%q) = true, want false", ext)

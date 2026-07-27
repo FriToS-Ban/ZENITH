@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"github.com/shramanb113/ZENITH/internal/crawler"
+	"github.com/shramanb113/ZENITH/internal/fileindex"
+	imageindexer "github.com/shramanb113/ZENITH/internal/image"
+	"github.com/shramanb113/ZENITH/internal/pdf"
 	"github.com/spf13/cobra"
 )
 
@@ -51,12 +55,35 @@ Supported formats:
 		}
 		defer w.Close()
 
+		pi := pdf.NewIndexer(engine, alog)
+		w.RegisterFileIndexer(".pdf", pi)
+
+		ii := imageindexer.NewIndexer(engine, alog)
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} {
+			w.RegisterFileIndexer(ext, ii)
+		}
+
+		w.SetOnFileIndexed(func(path string) {
+			n := count.Add(1)
+			printProgress(n, filepath.Base(path))
+		})
+
+		// Content-hash deduplication: skip files unchanged since the last run.
+		home, _ := os.UserHomeDir()
+		if fi, err := fileindex.Open(filepath.Join(home, ".zenith", "file_hashes.json")); err == nil {
+			w.SetSkipFile(fi.IsUpToDate)
+			w.SetAfterFile(func(path string) { _ = fi.Mark(path) })
+			defer fi.Save()
+		}
+
 		start := time.Now()
 		ctx := context.Background()
 		if err := w.IndexDir(ctx, dir); err != nil {
+			clearProgress()
 			return fmt.Errorf("index: %w", err)
 		}
 
+		clearProgress()
 		elapsed := time.Since(start)
 		n := count.Load()
 
@@ -83,7 +110,8 @@ type countingIndexer struct {
 func (c *countingIndexer) Add(ctx context.Context, id, text string) error {
 	err := c.inner.Add(ctx, id, text)
 	if err == nil {
-		c.n.Add(1)
+		n := c.n.Add(1)
+		printProgress(n, filepath.Base(id))
 	}
 	return err
 }

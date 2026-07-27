@@ -389,6 +389,97 @@ func OpenWAL(path string, cfg WALConfig) (*WAL, []Record, error) {
 	return wal, records, nil
 }
 
+// AppendBatch writes all records to the WAL and performs a single fsync at the
+// end, regardless of batch size. This is significantly faster than calling
+// Append in a loop when SyncAlways is set, because N records pay for exactly
+// one fsync instead of N. Returns the assigned sequence number for each record
+// in the same order. An empty or nil batch is a no-op returning nil, nil.
+func (w *WAL) AppendBatch(ctx context.Context, records []*Record) ([]uint64, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	if w.closed.Load() {
+		return nil, errors.New("wal is closed")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Encode all records before acquiring the lock so we hold it as briefly as possible.
+	entries := make([][]byte, 0, len(records))
+	for _, r := range records {
+		if err := r.Validate(); err != nil {
+			return nil, err
+		}
+		body, err := encodeRecord(r)
+		if err != nil {
+			return nil, err
+		}
+		entry, err := buildEntry(body)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	seqs := make([]uint64, len(records))
+	for i, entry := range entries {
+		records[i].Seq = w.seq.Add(1)
+		seqs[i] = records[i].Seq
+
+		n, err := w.buf.Write(entry)
+		if err != nil {
+			return nil, err
+		}
+		if n != len(entry) {
+			return nil, errors.New("partial write")
+		}
+		w.byteWritten += uint64(len(entry))
+	}
+
+	// Single fsync for the entire batch.
+	if w.cfg.SyncMode == SyncAlways {
+		if err := w.buf.Flush(); err != nil {
+			return nil, err
+		}
+		if err := w.file.Sync(); err != nil {
+			return nil, err
+		}
+	}
+
+	return seqs, nil
+}
+
+// Reset flushes, syncs, and truncates the WAL file to zero, then resets
+// internal state so the WAL can accept new records. Called after a
+// successful gob checkpoint — the delta journal is no longer needed.
+func (w *WAL) Reset() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.buf.Flush(); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	w.buf.Reset(w.file)
+	w.byteWritten = 0
+	w.seq.Store(0)
+	return nil
+}
+
 func (w *WAL) Close() error {
 	if !w.closed.CompareAndSwap(false, true) {
 		return nil

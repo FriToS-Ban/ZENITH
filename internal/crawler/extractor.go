@@ -31,7 +31,9 @@ func ExtractText(path string) (string, error) {
 	case ".html", ".htm":
 		return extractHTML(path)
 	case ".pdf":
-		return "", fmt.Errorf("%w: .pdf requires an external PDF library", ErrUnsupported)
+		return "", fmt.Errorf("%w: .pdf requires the Nerve sidecar", ErrUnsupported)
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif":
+		return "", fmt.Errorf("%w: image files require the Nerve sidecar", ErrUnsupported)
 	default:
 		return extractRaw(path)
 	}
@@ -51,7 +53,9 @@ func SupportedExt(ext string) bool {
 		".json", ".yaml", ".yml",
 		".go",
 		".py", ".ts", ".js", ".jsx", ".tsx", ".rs", ".java", ".c", ".cpp", ".h",
-		".html", ".htm":
+		".html", ".htm",
+		".pdf",
+		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif":
 		return true
 	default:
 		return false

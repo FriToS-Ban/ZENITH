@@ -427,7 +427,7 @@ function initCopyButtons() {
     }
 
     navigator.clipboard.writeText(textToCopy).then(() => {
-      showFeedback('✓ Copied!', '#00f5d4', '#000');
+      showFeedback('✓ Copied!', '#22c55e', '#04100b');
     }).catch(() => {
       showFeedback('❌ Failed!', '#ef4444', '#fff');
     });

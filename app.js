@@ -100,7 +100,7 @@ function initSearchSimulator() {
     const queryTokens = qLower.split(/\s+/).filter(t => t.length > 0);
 
     // Calculate dynamic matching scores based on query
-    const scoredDocs = MOCK_DOCUMENTS.map(doc => {
+    const docScores = MOCK_DOCUMENTS.map(doc => {
       let lexicalMatch = 0;
       let vectorMatch = doc.vector;
       let isFuzzy = false;
@@ -110,8 +110,10 @@ function initSearchSimulator() {
         if (qLower.includes(kw)) lexicalMatch += 2.5;
         // Check fuzzy match for individual query tokens
         queryTokens.forEach(token => {
+          if (token.length < 3) return;
           if (!kw.includes(token)) {
-            if (levenshteinDistance(token, kw) <= 2) {
+            const maxDist = token.length <= 4 ? 1 : 2;
+            if (levenshteinDistance(token, kw) <= maxDist) {
               lexicalMatch += 1.8;
               isFuzzy = true;
             }
@@ -126,11 +128,27 @@ function initSearchSimulator() {
         vectorMatch = Math.min(0.98, vectorMatch + 0.02);
       }
 
+      return { doc, lexicalMatch, vectorMatch, isFuzzy };
+    });
+
+    // Derive lexical and vector ranks across full document set
+    const sortedByLexical = [...docScores].sort((a, b) => b.lexicalMatch - a.lexicalMatch);
+    const lexicalRankMap = new Map();
+    sortedByLexical.forEach((item, idx) => lexicalRankMap.set(item.doc.id, idx + 1));
+
+    const sortedByVector = [...docScores].sort((a, b) => b.vectorMatch - a.vectorMatch);
+    const vectorRankMap = new Map();
+    sortedByVector.forEach((item, idx) => vectorRankMap.set(item.doc.id, idx + 1));
+
+    const scoredDocs = docScores.map(({ doc, lexicalMatch, vectorMatch, isFuzzy }) => {
+      const lexRank = lexicalRankMap.get(doc.id);
+      const vecRank = vectorRankMap.get(doc.id);
+
+      const rrfVal = (lexicalMatch > 0 ? 1 / (60 + lexRank) : 0) + (1 / (60 + vecRank));
+      const rrfScore = rrfVal.toFixed(4);
+
       const bm25Score = lexicalMatch > 0 ? (doc.bm25 + lexicalMatch).toFixed(2) : "0.00";
       const vecScore = (vectorMatch * 100).toFixed(1) + "%";
-
-      // Reciprocal Rank Fusion calculation simulation
-      const rrfScore = lexicalMatch > 0 ? (1 / (60 + doc.id * 2) + 1 / (60 + doc.id)).toFixed(4) : (1 / (60 + doc.id * 5)).toFixed(4);
 
       return {
         ...doc,
@@ -176,19 +194,12 @@ function initSearchSimulator() {
   input.addEventListener('input', (e) => renderResults(e.target.value));
 
   chips.forEach(chip => {
-    const handleChipSelect = () => {
+    chip.addEventListener('click', () => {
       chips.forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       const q = chip.getAttribute('data-query');
       input.value = q;
       renderResults(q);
-    };
-    chip.addEventListener('click', handleChipSelect);
-    chip.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        handleChipSelect();
-      }
     });
   });
 
@@ -311,7 +322,7 @@ function initArchitectureVisualizer() {
   const descEl = document.getElementById('arch-detail-desc');
   const specsEl = document.getElementById('arch-detail-specs');
 
-  if (!nodes.length || !titleEl) return;
+  if (!nodes.length || !titleEl || !descEl || !specsEl) return;
 
   function updateDetail(key) {
     const data = ARCH_DATA[key] || ARCH_DATA['wal'];
@@ -327,18 +338,11 @@ function initArchitectureVisualizer() {
   }
 
   nodes.forEach(node => {
-    const handleNodeSelect = () => {
+    node.addEventListener('click', () => {
       nodes.forEach(n => n.classList.remove('active'));
       node.classList.add('active');
       const key = node.getAttribute('data-node');
       updateDetail(key);
-    };
-    node.addEventListener('click', handleNodeSelect);
-    node.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        handleNodeSelect();
-      }
     });
   });
 
@@ -391,14 +395,29 @@ function initCLITerminal() {
 
   if (!tabs.length || !body) return;
 
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      const cmd = tab.getAttribute('data-cmd');
-      body.innerHTML = CLI_COMMANDS[cmd] || CLI_COMMANDS['index'];
+  function selectTab(selectedTab) {
+    const cmd = selectedTab.getAttribute('data-cmd');
+    tabs.forEach(t => {
+      const isActive = t === selectedTab;
+      t.classList.toggle('active', isActive);
+      t.setAttribute('aria-selected', isActive ? 'true' : 'false');
     });
+
+    const content = Object.prototype.hasOwnProperty.call(CLI_COMMANDS, cmd)
+      ? CLI_COMMANDS[cmd]
+      : CLI_COMMANDS['index'];
+
+    body.innerHTML = content;
+  }
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => selectTab(tab));
   });
+
+  const initialTab = document.querySelector('.cli-tab.active') || tabs[0];
+  if (initialTab) {
+    selectTab(initialTab);
+  }
 }
 
 // 4. Copy Buttons
@@ -406,20 +425,27 @@ function initCopyButtons() {
   const copyBtn = document.getElementById('copy-cmd-btn');
   if (!copyBtn) return;
 
+  const originalText = copyBtn.innerHTML;
+  let copyTimeout = null;
+
+  const showFeedback = (msg, bg, color) => {
+    if (copyTimeout) {
+      clearTimeout(copyTimeout);
+    }
+    copyBtn.innerHTML = msg;
+    copyBtn.style.background = bg;
+    copyBtn.style.color = color;
+
+    copyTimeout = setTimeout(() => {
+      copyBtn.innerHTML = originalText;
+      copyBtn.style.background = "";
+      copyBtn.style.color = "";
+      copyTimeout = null;
+    }, 2000);
+  };
+
   copyBtn.addEventListener('click', () => {
     const textToCopy = "go install github.com/shramanb113/ZENITH/cmd/zenith@latest";
-
-    const showFeedback = (msg, bg, color) => {
-      const originalText = copyBtn.innerHTML;
-      copyBtn.innerHTML = msg;
-      copyBtn.style.background = bg;
-      copyBtn.style.color = color;
-      setTimeout(() => {
-        copyBtn.innerHTML = originalText;
-        copyBtn.style.background = "";
-        copyBtn.style.color = "";
-      }, 2000);
-    };
 
     if (!navigator.clipboard || !navigator.clipboard.writeText) {
       showFeedback('❌ Failed!', '#ef4444', '#fff');

@@ -7,6 +7,9 @@
   <meta name="description" content="A local-first hybrid search engine with an LSM-backed index, written in Go. Combines BM25 lexical search, BK-tree fuzzy matching, and neural vector embeddings.">
   <meta property="og:title" content="ZENITH — Local-First Hybrid Neural Search Engine">
   <meta property="og:description" content="Fast, private local directory indexing and hybrid semantic search powered by Go, LSM trees, and neural sidecar embeddings.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -276,24 +279,16 @@
             <span class="dot dot-green"></span>
           </div>
 
-          <div class="cli-tabs">
-            <button class="cli-tab active" data-cmd="index">zenith index</button>
-            <button class="cli-tab" data-cmd="search">zenith search</button>
-            <button class="cli-tab" data-cmd="watch">zenith watch</button>
-            <button class="cli-tab" data-cmd="log">zenith log</button>
-            <button class="cli-tab" data-cmd="serve">zenith serve</button>
+          <div class="cli-tabs" role="tablist" aria-label="CLI commands">
+            <button type="button" class="cli-tab active" role="tab" aria-selected="true" aria-controls="terminal-body" data-cmd="index">zenith index</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="search">zenith search</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="watch">zenith watch</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="log">zenith log</button>
+            <button type="button" class="cli-tab" role="tab" aria-selected="false" aria-controls="terminal-body" data-cmd="serve">zenith serve</button>
           </div>
         </div>
 
-        <div class="terminal-body" id="terminal-body">
-<span class="t-prompt">$</span> <span class="t-cmd">zenith index ~/Documents</span>
-<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Scanning directory: <span class="t-cmd">~/Documents</span>
-<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Embedded sidecar 'nerve' status: <span class="t-success">ACTIVE</span> (http://127.0.0.1:8000)
-<span class="t-dim">[17:42:02]</span> <span class="t-info">INF</span> Extracted 428 documents (.md, .go, .html, .txt)
-<span class="t-dim">[17:42:04]</span> <span class="t-info">INF</span> Generated 384-d vector embeddings via nerve (all-MiniLM-L6-v2)
-<span class="t-dim">[17:42:05]</span> <span class="t-info">INF</span> SSTable flush complete: memtable_size=14.2MB sstable_id=00004
-<span class="t-dim">[17:42:05]</span> <span class="t-success">SUCCESS</span> Indexed 428 files in 3.84s (111.4 docs/sec)
-        </div>
+        <div class="terminal-body" id="terminal-body" role="tabpanel" aria-live="polite"></div>
       </div>
     </div>
   </section>
@@ -413,9 +408,9 @@
         <div class="footer-col">
           <h5>Community & Docs</h5>
           <ul>
-            <li><a href="https://github.com/shramanb113/ZENITH" target="_blank">GitHub Repository</a></li>
-            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/README.md" target="_blank">Documentation</a></li>
-            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/LICENSE" target="_blank">MIT License</a></li>
+            <li><a href="https://github.com/shramanb113/ZENITH" target="_blank" rel="noopener">GitHub Repository</a></li>
+            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/README.md" target="_blank" rel="noopener">Documentation</a></li>
+            <li><a href="https://github.com/shramanb113/ZENITH/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
           </ul>
         </div>
       </div>

@@ -1,5 +1,4 @@
 /* ZENITH Landing Page Design System — Soothing Jade Emerald & Rich Animations */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
   --bg-dark: #07120e;
@@ -335,6 +334,7 @@ body {
 .gradient-text {
   background: linear-gradient(135deg, #ffffff 0%, #4ade80 45%, #10b981 100%);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
@@ -1201,12 +1201,26 @@ footer {
     gap: 16px;
     transform: translateY(-150%);
     opacity: 0;
+    visibility: hidden;
     pointer-events: none;
     transition: var(--transition);
   }
   .nav-links.active {
     transform: translateY(0);
     opacity: 1;
+    visibility: visible;
     pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -1,11 +1,31 @@
 // ZENITH Interactive Landing Page Logic
 
 document.addEventListener('DOMContentLoaded', () => {
+  initMobileNav();
   initSearchSimulator();
   initArchitectureVisualizer();
   initCLITerminal();
   initCopyButtons();
 });
+
+function initMobileNav() {
+  const navToggle = document.getElementById('nav-toggle');
+  const navLinks = document.querySelector('.nav-links');
+  if (!navToggle || !navLinks) return;
+
+  navToggle.addEventListener('click', () => {
+    const isExpanded = navToggle.getAttribute('aria-expanded') === 'true';
+    navToggle.setAttribute('aria-expanded', !isExpanded);
+    navLinks.classList.toggle('active');
+  });
+
+  navLinks.querySelectorAll('a').forEach(link => {
+    link.addEventListener('click', () => {
+      navLinks.classList.remove('active');
+      navToggle.setAttribute('aria-expanded', 'false');
+    });
+  });
+}
 
 // 1. Interactive Search Simulator
 const MOCK_DOCUMENTS = [
@@ -77,6 +97,7 @@ function initSearchSimulator() {
     }
 
     const qLower = query.toLowerCase();
+    const queryTokens = qLower.split(/\s+/).filter(t => t.length > 0);
 
     // Calculate dynamic matching scores based on query
     const scoredDocs = MOCK_DOCUMENTS.map(doc => {
@@ -87,11 +108,15 @@ function initSearchSimulator() {
       // Simple keyword matching simulation
       doc.keywords.forEach(kw => {
         if (qLower.includes(kw)) lexicalMatch += 2.5;
-        // Check fuzzy match (e.g. kubernets -> kubernetes)
-        if (levenshteinDistance(qLower, kw) <= 2 && !qLower.includes(kw)) {
-          lexicalMatch += 1.8;
-          isFuzzy = true;
-        }
+        // Check fuzzy match for individual query tokens
+        queryTokens.forEach(token => {
+          if (!kw.includes(token)) {
+            if (levenshteinDistance(token, kw) <= 2) {
+              lexicalMatch += 1.8;
+              isFuzzy = true;
+            }
+          }
+        });
       });
 
       // Embedder mode adjustments
@@ -151,12 +176,19 @@ function initSearchSimulator() {
   input.addEventListener('input', (e) => renderResults(e.target.value));
 
   chips.forEach(chip => {
-    chip.addEventListener('click', () => {
+    const handleChipSelect = () => {
       chips.forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       const q = chip.getAttribute('data-query');
       input.value = q;
       renderResults(q);
+    };
+    chip.addEventListener('click', handleChipSelect);
+    chip.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleChipSelect();
+      }
     });
   });
 
@@ -177,7 +209,8 @@ function highlightQuery(text, query) {
   const words = query.split(/\s+/).filter(w => w.length > 2);
   let highlighted = text;
   words.forEach(word => {
-    const regex = new RegExp(`(${word})`, 'gi');
+    const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(${escapedWord})`, 'gi');
     highlighted = highlighted.replace(regex, '<mark>$1</mark>');
   });
   return highlighted;
@@ -294,11 +327,18 @@ function initArchitectureVisualizer() {
   }
 
   nodes.forEach(node => {
-    node.addEventListener('click', () => {
+    const handleNodeSelect = () => {
       nodes.forEach(n => n.classList.remove('active'));
       node.classList.add('active');
       const key = node.getAttribute('data-node');
       updateDetail(key);
+    };
+    node.addEventListener('click', handleNodeSelect);
+    node.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleNodeSelect();
+      }
     });
   });
 
@@ -308,7 +348,7 @@ function initArchitectureVisualizer() {
 // 3. CLI Terminal Showcase
 const CLI_COMMANDS = {
   index: `<span class="t-prompt">$</span> <span class="t-cmd">zenith index ~/Documents</span>
-<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Scanning directory: <span class="t-cmd">C:/Users/SHIBASISH/Documents</span>
+<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Scanning directory: <span class="t-cmd">~/Documents</span>
 <span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Embedded sidecar 'nerve' status: <span class="t-success">ACTIVE</span> (http://127.0.0.1:8000)
 <span class="t-dim">[17:42:02]</span> <span class="t-info">INF</span> Extracted 428 documents (.md, .go, .html, .txt)
 <span class="t-dim">[17:42:04]</span> <span class="t-info">INF</span> Generated 384-d vector embeddings via nerve (all-MiniLM-L6-v2)
@@ -368,16 +408,28 @@ function initCopyButtons() {
 
   copyBtn.addEventListener('click', () => {
     const textToCopy = "go install github.com/shramanb113/ZENITH/cmd/zenith@latest";
-    navigator.clipboard.writeText(textToCopy).then(() => {
+
+    const showFeedback = (msg, bg, color) => {
       const originalText = copyBtn.innerHTML;
-      copyBtn.innerHTML = `✓ Copied!`;
-      copyBtn.style.background = "#00f5d4";
-      copyBtn.style.color = "#000";
+      copyBtn.innerHTML = msg;
+      copyBtn.style.background = bg;
+      copyBtn.style.color = color;
       setTimeout(() => {
         copyBtn.innerHTML = originalText;
         copyBtn.style.background = "";
         copyBtn.style.color = "";
       }, 2000);
+    };
+
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      showFeedback('❌ Failed!', '#ef4444', '#fff');
+      return;
+    }
+
+    navigator.clipboard.writeText(textToCopy).then(() => {
+      showFeedback('✓ Copied!', '#00f5d4', '#000');
+    }).catch(() => {
+      showFeedback('❌ Failed!', '#ef4444', '#fff');
     });
   });
 }

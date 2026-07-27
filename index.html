@@ -20,6 +20,12 @@
         <span class="logo-badge">v1.0.0</span>
       </a>
 
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle Navigation Menu" aria-expanded="false">
+        <span class="hamburger-bar"></span>
+        <span class="hamburger-bar"></span>
+        <span class="hamburger-bar"></span>
+      </button>
+
       <ul class="nav-links">
         <li><a href="#demo" class="nav-link">Live Demo</a></li>
         <li><a href="#architecture" class="nav-link">Architecture</a></li>
@@ -87,7 +93,7 @@
       <!-- Hero Visual -->
       <div class="hero-visual">
         <div class="hero-card">
-          <img src="hero_icon.png" alt="ZENITH Neural Search Core" class="hero-img">
+          <img src="hero_icon.png" alt="ZENITH Neural Search Core" class="hero-img" width="1024" height="1024">
         </div>
       </div>
     </div>
@@ -110,10 +116,10 @@
 
         <div class="sim-controls">
           <div class="preset-queries">
-            <span class="chip active" data-query="kubernetes memory debugging">kubernetes memory debugging</span>
-            <span class="chip" data-query="kubernets deployement">kubernets deployement (typo)</span>
-            <span class="chip" data-query="lsm memtable sstable bloom">lsm memtable sstable</span>
-            <span class="chip" data-query="rank fusion cosine scoring">rank fusion cosine</span>
+            <button type="button" class="chip active" data-query="kubernetes memory debugging">kubernetes memory debugging</button>
+            <button type="button" class="chip" data-query="kubernets deployement">kubernets deployement (typo)</button>
+            <button type="button" class="chip" data-query="lsm memtable sstable bloom">lsm memtable sstable</button>
+            <button type="button" class="chip" data-query="rank fusion cosine scoring">rank fusion cosine</button>
           </div>
 
           <div class="mode-selector">
@@ -147,22 +153,22 @@
           <div class="pipeline-group">
             <span class="pipeline-title">1. Storage Engine (Write Path)</span>
             <div class="nodes-row">
-              <div class="arch-node active" data-node="wal">
+              <button type="button" class="arch-node active" data-node="wal">
                 <div class="node-icon">📜</div>
                 <div class="node-title">Write-Ahead Log</div>
-              </div>
-              <div class="arch-node" data-node="memtable">
+              </button>
+              <button type="button" class="arch-node" data-node="memtable">
                 <div class="node-icon">⚡</div>
                 <div class="node-title">MemTable Skip-List</div>
-              </div>
-              <div class="arch-node" data-node="sstable">
+              </button>
+              <button type="button" class="arch-node" data-node="sstable">
                 <div class="node-icon">💾</div>
                 <div class="node-title">SSTable Files</div>
-              </div>
-              <div class="arch-node" data-node="bloom">
+              </button>
+              <button type="button" class="arch-node" data-node="bloom">
                 <div class="node-icon">🎯</div>
                 <div class="node-title">Bloom Filter</div>
-              </div>
+              </button>
             </div>
           </div>
 
@@ -170,18 +176,18 @@
           <div class="pipeline-group">
             <span class="pipeline-title">2. Intelligence & Hybrid Query Path</span>
             <div class="nodes-row">
-              <div class="arch-node" data-node="bktree">
+              <button type="button" class="arch-node" data-node="bktree">
                 <div class="node-icon">🌲</div>
                 <div class="node-title">BK-Tree Fuzzy</div>
-              </div>
-              <div class="arch-node" data-node="nerve">
+              </button>
+              <button type="button" class="arch-node" data-node="nerve">
                 <div class="node-icon">🧠</div>
                 <div class="node-title">Nerve Embedder</div>
-              </div>
-              <div class="arch-node" data-node="rrf">
+              </button>
+              <button type="button" class="arch-node" data-node="rrf">
                 <div class="node-icon">⚖️</div>
                 <div class="node-title">RRF Rank Fusion</div>
-              </div>
+              </button>
             </div>
           </div>
         </div>
@@ -279,7 +285,7 @@
 
         <div class="terminal-body" id="terminal-body">
 <span class="t-prompt">$</span> <span class="t-cmd">zenith index ~/Documents</span>
-<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Scanning directory: <span class="t-cmd">C:/Users/SHIBASISH/Documents</span>
+<span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Scanning directory: <span class="t-cmd">~/Documents</span>
 <span class="t-dim">[17:42:01]</span> <span class="t-info">INF</span> Embedded sidecar 'nerve' status: <span class="t-success">ACTIVE</span> (http://127.0.0.1:8000)
 <span class="t-dim">[17:42:02]</span> <span class="t-info">INF</span> Extracted 428 documents (.md, .go, .html, .txt)
 <span class="t-dim">[17:42:04]</span> <span class="t-info">INF</span> Generated 384-d vector embeddings via nerve (all-MiniLM-L6-v2)
